@@ -1,0 +1,44 @@
+# fly.toml — OpenLEADR-rs VTN on Fly.io (Sydney)
+# Place this file at the repo root of your openleadr-rs fork.
+# App name is set to openleadr-vtn-au — change here if you later rename the Fly app.
+
+app = "openleadr-vtn-au"
+primary_region = "syd"
+
+[build]
+  dockerfile = "vtn.Dockerfile"
+
+# Internal port the VTN listens on (matches EXPOSE 3000 in vtn.Dockerfile
+# and openleadr-vtn's default PORT=3000).
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "stop"      # scale to zero when idle
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+  # openleadr-vtn exposes /health
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "15s"
+    method = "GET"
+    path = "/health"
+
+[env]
+  # Public env — secrets go via `fly secrets set` (see README below).
+  RUST_LOG = "openleadr_vtn=info,sqlx=warn,info"
+  PORT = "3000"
+  # OAUTH_TOKEN_URL and OAUTH_VALID_AUDIENCES are set as secrets so they
+  # can be templated to your real https URL once you know it.
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  cpus = 1
