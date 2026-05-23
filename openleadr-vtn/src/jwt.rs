@@ -267,6 +267,20 @@ impl Claims {
             ))
         })
     }
+
+    /// Synthetic anonymous claims used when `PUBLIC_READS=true` allows
+    /// unauthenticated GET requests on read-only endpoints. Grants ReadAll only.
+    /// Never written to a JWT or trusted for write operations.
+    pub(crate) fn anonymous_read_all() -> Self {
+        Self {
+            sub: "anonymous".to_string(),
+            exp: 0,
+            iat: None,
+            nbf: None,
+            aud: None,
+            scope: Scopes(vec![Scope::ReadAll]),
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, Default, derive_more::From, AsRef, PartialEq)]
@@ -615,6 +629,55 @@ where
         trace!(user = ?claims, "Extracted User from request");
 
         Ok(User(claims))
+    }
+}
+
+/// Optional user extractor used on GET endpoints that may be made public
+/// via the `PUBLIC_READS=true` environment variable.
+///
+/// Behaviour:
+/// - Valid Bearer token  → `MaybeUser(Some(user))` with the real claims
+/// - No / invalid Bearer  → `MaybeUser(None)` if `PUBLIC_READS=true`,
+///   otherwise the normal auth error.
+///
+/// SECURITY: only wire this into endpoints you intend to expose anonymously.
+/// Never use for create/update/delete handlers.
+pub struct MaybeUser(pub(crate) Option<User>);
+
+impl MaybeUser {
+    /// Resolve to a real `User` if one was supplied, otherwise return a synthetic
+    /// anonymous user with `ReadAll` scope. Caller must already have decided
+    /// that anonymous access is acceptable on this route.
+    pub(crate) fn into_user_or_anonymous(self) -> User {
+        match self.0 {
+            Some(u) => u,
+            None => User(Claims::anonymous_read_all()),
+        }
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for MaybeUser
+where
+    Arc<JwtManager>: FromRef<S>,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let public_reads = std::env::var("PUBLIC_READS")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+            .unwrap_or(false);
+
+        match User::from_request_parts(parts, state).await {
+            Ok(u) => Ok(MaybeUser(Some(u))),
+            Err(e) => {
+                if public_reads {
+                    trace!("PUBLIC_READS=true and no/invalid Bearer token; treating as anonymous");
+                    Ok(MaybeUser(None))
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 }
 
