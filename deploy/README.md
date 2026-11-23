@@ -263,7 +263,13 @@ separate Fly app `openleadr-mqtt-au` (Sydney). The broker files are in
 | Path | Address | Who |
 |---|---|---|
 | VTN to broker | `tcp://openleadr-mqtt-au.internal:1883` (Fly private network only) | user `vtn`, publishes every topic |
-| Public subscribers | `wss://openleadr-mqtt-au.fly.dev:443` (Fly terminates TLS) | anonymous, read-only on `programs/#`, `events/#`, `push/programs/#`, `push/events/#` |
+| Public subscribers, MQTT over TLS | `mqtts://openleadr-mqtt-au.fly.dev:8883` (Fly terminates TLS, forwards to listener 1884) | anonymous, read-only on `programs/#`, `events/#`, `push/programs/#`, `push/events/#` |
+| Public subscribers, websockets | `wss://openleadr-mqtt-au.fly.dev:443` (Fly terminates TLS, forwards to listener 8080) | same as above |
+
+The VTN advertises one URI in `GET /notifiers`. It advertises the `mqtts://`
+address, because the Home Assistant VEN (`openadr3-ven-hass`) picks up the
+broker from there and supports only MQTT over TCP. Browser and other
+websockets clients can still use the `wss://` address directly.
 
 The `vens/`, `reports/`, `resources/` and `resource_groups/` topics are not
 readable anonymously. Messages are QoS 0 and not retained, so a new
@@ -285,7 +291,7 @@ fly deploy --remote-only --ha=false -a openleadr-mqtt-au
 ```bash
 fly secrets set -a openleadr-vtn-au \
   MQTT_URL=tcp://openleadr-mqtt-au.internal:1883 \
-  MQTT_ADVERTISE_URL=wss://openleadr-mqtt-au.fly.dev:443 \
+  MQTT_ADVERTISE_URL=mqtts://openleadr-mqtt-au.fly.dev:8883 \
   MQTT_USERNAME=vtn MQTT_PASSWORD=<same random>
 ```
 
@@ -305,3 +311,5 @@ c.connect("openleadr-mqtt-au.fly.dev", 443)
 c.subscribe("events/#")
 c.loop_forever()
 ```
+
+For MQTT over TLS, drop `transport="websockets"` and connect to port 8883.
