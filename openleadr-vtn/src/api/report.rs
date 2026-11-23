@@ -1,25 +1,28 @@
 use std::sync::Arc;
 
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{info, instrument, trace};
 use validator::Validate;
 
 use openleadr_wire::{
+    Report,
     event::EventId,
     program::ProgramId,
     report::{ReportId, ReportRequest},
     subscription::{AnyObject, Operation},
-    Report,
 };
 
 use crate::{
-    api::{subscription, subscription::NotifierState, AppResponse, ValidatedJson, ValidatedQuery},
-    data_source::{EventCrud, ReportCrud},
+    api::{
+        AppResponse, ValidatedJson, ValidatedQuery,
+        subscription::{self, NotifierState},
+    },
+    data_source::{EventCrud, ReportCrud, VenCrud, VenObjectPrivacy},
     error::AppError,
     jwt::{Scope, User},
 };
@@ -30,9 +33,9 @@ pub async fn get_all(
     ValidatedQuery(query_params): ValidatedQuery<QueryParams>,
     User(user): User,
 ) -> AppResponse<Vec<Report>> {
-    let reports = if user.scope.contains(Scope::ReadAll) {
+    let reports = if user.has_scope(Scope::ReadAll) {
         report_source.retrieve_all(&query_params, &None).await?
-    } else if user.scope.contains(Scope::ReadVenObjects) {
+    } else if user.has_scope(Scope::ReadVenObjects) {
         report_source
             .retrieve_all(&query_params, &Some(user.client_id()?))
             .await?
@@ -53,9 +56,9 @@ pub async fn get(
     Path(id): Path<ReportId>,
     User(user): User,
 ) -> AppResponse<Report> {
-    let report = if user.scope.contains(Scope::ReadAll) {
+    let report = if user.has_scope(Scope::ReadAll) {
         report_source.retrieve(&id, &None).await?
-    } else if user.scope.contains(Scope::ReadVenObjects) {
+    } else if user.has_scope(Scope::ReadVenObjects) {
         report_source
             .retrieve(&id, &Some(user.client_id()?))
             .await?
@@ -70,26 +73,33 @@ pub async fn get(
     Ok(Json(report))
 }
 
-#[instrument(skip(user, event_source, report_source, notifier_state))]
+#[instrument(skip(user, ven_source, event_source, privacy, report_source, notifier_state))]
 pub async fn add(
+    State(ven_source): State<Arc<dyn VenCrud>>,
     State(event_source): State<Arc<dyn EventCrud>>,
+    State(privacy): State<Arc<dyn VenObjectPrivacy>>,
     State(report_source): State<Arc<dyn ReportCrud>>,
     State(notifier_state): State<Arc<NotifierState>>,
     User(user): User,
     ValidatedJson(new_report): ValidatedJson<ReportRequest>,
 ) -> Result<(StatusCode, Json<Report>), AppError> {
-    let report = if user.scope.contains(Scope::WriteReports) {
+    let report = if user.has_scope(Scope::WriteReportsBl) || user.has_scope(Scope::WriteReportsVen)
+    {
         report_source
             .create(new_report, &Some(user.client_id()?))
             .await?
     } else {
-        return Err(AppError::Forbidden("Missing 'write_reports' scope"));
+        return Err(AppError::Forbidden(
+            "Missing 'write_reports_bl' or 'write_reports_ven' scope",
+        ));
     };
 
     info!(%report.id, report_name=?report.content.report_name, client_id = user.sub, "report created");
 
     subscription::notify(
+        &*ven_source,
         &*event_source,
+        &*privacy,
         &notifier_state,
         Operation::Create,
         AnyObject::Report(report.clone()),
@@ -99,27 +109,39 @@ pub async fn add(
     Ok((StatusCode::CREATED, Json(report)))
 }
 
-#[instrument(skip(user, event_source, report_source, notifier_state))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Handler which uses many aspects of the state"
+)]
+#[instrument(skip(user, ven_source, event_source, privacy, report_source, notifier_state))]
 pub async fn edit(
+    State(ven_source): State<Arc<dyn VenCrud>>,
     State(event_source): State<Arc<dyn EventCrud>>,
+    State(privacy): State<Arc<dyn VenObjectPrivacy>>,
     State(report_source): State<Arc<dyn ReportCrud>>,
     State(notifier_state): State<Arc<NotifierState>>,
     Path(id): Path<ReportId>,
     User(user): User,
     ValidatedJson(content): ValidatedJson<ReportRequest>,
 ) -> AppResponse<Report> {
-    let report = if user.scope.contains(Scope::WriteReports) {
+    let report = if user.has_scope(Scope::WriteReportsBl) {
+        report_source.update(&id, content, &None).await?
+    } else if user.has_scope(Scope::WriteReportsVen) {
         report_source
             .update(&id, content, &Some(user.client_id()?))
             .await?
     } else {
-        return Err(AppError::Forbidden("Missing 'write_reports' scope"));
+        return Err(AppError::Forbidden(
+            "Missing 'write_reports_bl' or 'write_reports_ven' scope",
+        ));
     };
 
     info!(%report.id, report_name=?report.content.report_name, client_id = user.sub, "report updated");
 
     subscription::notify(
+        &*ven_source,
         &*event_source,
+        &*privacy,
         &notifier_state,
         Operation::Update,
         AnyObject::Report(report.clone()),
@@ -129,29 +151,32 @@ pub async fn edit(
     Ok(Json(report))
 }
 
-#[instrument(skip(user, event_source, report_source, notifier_state))]
+#[instrument(skip(user, ven_source, event_source, privacy, report_source, notifier_state))]
 pub async fn delete(
+    State(ven_source): State<Arc<dyn VenCrud>>,
     State(event_source): State<Arc<dyn EventCrud>>,
+    State(privacy): State<Arc<dyn VenObjectPrivacy>>,
     State(report_source): State<Arc<dyn ReportCrud>>,
     State(notifier_state): State<Arc<NotifierState>>,
     User(user): User,
     Path(id): Path<ReportId>,
 ) -> AppResponse<Report> {
-    // The specification does only allow VEN clients to have write access to reports.
-    // Therefore, we can safely filter for the client_id, as there is no specified use-case
-    // where a BL client can delete a report.
-    // If a BL tried to delete a report, it would either fail by not having the `write_reports` scope
-    // or because the BLs client_id does not match the reports client_id.
-    let report = if user.scope.contains(Scope::WriteReports) {
+    let report = if user.has_scope(Scope::WriteReportsBl) {
+        report_source.delete(&id, &None).await?
+    } else if user.has_scope(Scope::WriteReportsVen) {
         report_source.delete(&id, &Some(user.client_id()?)).await?
     } else {
-        return Err(AppError::Forbidden("Missing 'write_reports' scope"));
+        return Err(AppError::Forbidden(
+            "Missing 'write_reports_bl' or 'write_reports_ven' scope",
+        ));
     };
 
     info!(%id, report_name=?report.content.report_name, client_id = user.sub, "deleted report");
 
     subscription::notify(
+        &*ven_source,
         &*event_source,
+        &*privacy,
         &notifier_state,
         Operation::Delete,
         AnyObject::Report(report.clone()),
@@ -187,6 +212,7 @@ mod test {
     use crate::{api::test::ApiTest, jwt::Scope};
     use axum::{body::Body, http, http::StatusCode};
     use openleadr_wire::{
+        Report,
         problem::Problem,
         report::{ReportPayloadDescriptor, ReportRequest, ReportType},
     };
@@ -256,10 +282,116 @@ mod test {
                 .await;
 
             assert_eq!(status, StatusCode::BAD_REQUEST);
-            assert!(error
-                .detail
-                .unwrap()
-                .contains("outside of allowed range 1..=128"))
+            assert!(
+                error
+                    .detail
+                    .unwrap()
+                    .contains("outside of allowed range 1..=128")
+            )
         }
+    }
+
+    #[sqlx::test(fixtures("programs", "events", "vens"))]
+    async fn bl_client_can_delete_ven_created_report(db: PgPool) {
+        let ven = ApiTest::new(db.clone(), "ven-1-client-id", vec![Scope::WriteReportsVen]).await;
+        let bl = ApiTest::new(db, "bl-client-id", vec![Scope::WriteReportsBl]).await;
+
+        let (status, report) = ven
+            .request::<Report>(
+                http::Method::POST,
+                "/reports",
+                Body::from(
+                    serde_json::to_vec(&ReportRequest {
+                        event_id: "event-1".parse().unwrap(),
+                        client_name: "ven-1-name".to_string(),
+                        ..default()
+                    })
+                    .unwrap(),
+                ),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(report.client_id.as_str(), "ven-1-client-id");
+
+        let (status, deleted) = bl
+            .request::<Report>(
+                http::Method::DELETE,
+                &format!("/reports/{}", report.id),
+                Body::empty(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(deleted.id, report.id);
+    }
+
+    #[sqlx::test(fixtures("programs", "events", "vens"))]
+    async fn ven_client_cannot_delete_other_vens_report(db: PgPool) {
+        let ven1 = ApiTest::new(db.clone(), "ven-1-client-id", vec![Scope::WriteReportsVen]).await;
+        let ven2 = ApiTest::new(db, "ven-2-client-id", vec![Scope::WriteReportsVen]).await;
+
+        let (status, report) = ven1
+            .request::<Report>(
+                http::Method::POST,
+                "/reports",
+                Body::from(
+                    serde_json::to_vec(&ReportRequest {
+                        event_id: "event-1".parse().unwrap(),
+                        client_name: "ven-1-name".to_string(),
+                        ..default()
+                    })
+                    .unwrap(),
+                ),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (status, _) = ven2
+            .request::<Problem>(
+                http::Method::DELETE,
+                &format!("/reports/{}", report.id),
+                Body::empty(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test(fixtures("programs", "events", "vens"))]
+    async fn report_names_are_not_unique(db: PgPool) {
+        let ven1 = ApiTest::new(db.clone(), "ven-1-client-id", vec![Scope::WriteReportsVen]).await;
+        let ven2 = ApiTest::new(db, "ven-2-client-id", vec![Scope::WriteReportsVen]).await;
+
+        let (status, _) = ven1
+            .request::<Report>(
+                http::Method::POST,
+                "/reports",
+                Body::from(
+                    serde_json::to_vec(&ReportRequest {
+                        event_id: "event-1".parse().unwrap(),
+                        client_name: "ven-1-name".to_string(),
+                        report_name: Some("not-unique".to_string()),
+                        ..default()
+                    })
+                    .unwrap(),
+                ),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (status, _) = ven2
+            .request::<Report>(
+                http::Method::POST,
+                "/reports",
+                Body::from(
+                    serde_json::to_vec(&ReportRequest {
+                        event_id: "event-2".parse().unwrap(),
+                        client_name: "ven-2-name".to_string(),
+                        report_name: Some("not-unique".to_string()),
+                        ..default()
+                    })
+                    .unwrap(),
+                ),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
     }
 }

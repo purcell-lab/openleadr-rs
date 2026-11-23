@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
 #[cfg(feature = "internal-oauth")]
-use jsonwebtoken::{encode, Header};
+use jsonwebtoken::{Header, encode};
 
 use crate::api::auth::ResponseOAuthError;
-use openleadr_wire::oauth::{OAuthError, OAuthErrorType};
+use openleadr_wire::{
+    Ven,
+    oauth::{OAuthError, OAuthErrorType},
+};
 
 use crate::{error::AppError, state::OAuthKeyType};
 use axum::{
@@ -12,8 +15,8 @@ use axum::{
     http::request::Parts,
 };
 use axum_extra::{
-    headers::{authorization::Bearer, Authorization},
     TypedHeader,
+    headers::{Authorization, authorization::Bearer},
 };
 #[cfg(feature = "internal-oauth")]
 use jsonwebtoken::EncodingKey;
@@ -24,9 +27,8 @@ use derive_more::AsRef;
 use openleadr_wire::ClientId;
 use reqwest::Url;
 use serde::{
-    de,
+    Deserialize, Deserializer, de,
     de::{DeserializeOwned, Visitor},
-    Deserialize, Deserializer, Serialize,
 };
 use std::{fmt, str::FromStr};
 
@@ -38,39 +40,6 @@ pub struct JwtManager {
     key_type: OAuthKeyType,
     validation: Validation,
     token_url: Url,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "Algorithm")]
-pub enum AlgorithmDef {
-    HS256,
-    HS384,
-    HS512,
-    ES256,
-    ES384,
-    RS256,
-    RS384,
-    RS512,
-    PS256,
-    PS384,
-    PS512,
-    EdDSA,
-}
-
-mod opt_algorithm_def {
-    use super::{Algorithm, AlgorithmDef};
-    use serde::{Deserialize, Deserializer};
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Algorithm>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Helper(#[serde(with = "AlgorithmDef")] Algorithm);
-
-        let helper = Option::deserialize(deserializer)?;
-        Ok(helper.map(|Helper(external)| external))
-    }
 }
 
 fn deserialize_vec_skipping_invalid<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
@@ -95,7 +64,7 @@ where
 /// Deserializes the JWT `aud` claim which can be either a single string or an array of strings.
 /// Always returns `Option<Vec<String>>` internally.
 mod string_or_vec {
-    use serde::{de, Deserializer};
+    use serde::{Deserializer, de};
     use std::fmt;
 
     struct StringOrVecVisitor;
@@ -113,7 +82,6 @@ mod string_or_vec {
         {
             Ok(None)
         }
-
         fn visit_unit<E>(self) -> Result<Self::Value, E>
         where
             E: de::Error,
@@ -158,8 +126,12 @@ pub enum Scope {
     ReadVenObjects,
     WritePrograms,
     WriteEvents,
-    WriteReports,
-    WriteSubscriptions,
+    WriteReportsBl,
+    #[serde(alias = "write_reports")]
+    WriteReportsVen,
+    WriteSubscriptionsBl,
+    #[serde(alias = "write_subscriptions")]
+    WriteSubscriptionsVen,
     WriteVensBl,
     #[serde(alias = "write_vens")]
     WriteVensVen,
@@ -180,8 +152,11 @@ impl FromStr for Scope {
             "read_ven_objects" => Ok(Scope::ReadVenObjects),
             "write_programs" => Ok(Scope::WritePrograms),
             "write_events" => Ok(Scope::WriteEvents),
-            "write_reports" => Ok(Scope::WriteReports),
-            "write_subscriptions" => Ok(Scope::WriteSubscriptions),
+            "write_reports_bl" => Ok(Scope::WriteReportsBl),
+            "write_reports_ven" => Ok(Scope::WriteReportsVen),
+            "write_reports" => Ok(Scope::WriteReportsVen),
+            "write_subscriptions_bl" => Ok(Scope::WriteSubscriptionsBl),
+            "write_subscriptions_ven" => Ok(Scope::WriteSubscriptionsVen),
             "write_vens_bl" => Ok(Scope::WriteVensBl),
             "write_vens_ven" => Ok(Scope::WriteVensVen),
             "write_vens" => Ok(Scope::WriteVensVen),
@@ -195,7 +170,7 @@ impl FromStr for Scope {
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize)]
 struct RsaKey {
     kty: OAuthKeyType,
-    #[serde(default, with = "opt_algorithm_def")]
+    #[serde(default)]
     alg: Option<Algorithm>,
     n: String,
     e: String,
@@ -211,7 +186,7 @@ struct RsaKeys {
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize)]
 struct EcKey {
     kty: OAuthKeyType,
-    #[serde(default, with = "opt_algorithm_def")]
+    #[serde(default)]
     alg: Option<Algorithm>,
     x: String,
     y: String,
@@ -228,7 +203,7 @@ struct EcKeys {
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize)]
 struct EdKey {
     kty: OAuthKeyType,
-    #[serde(default, with = "opt_algorithm_def")]
+    #[serde(default)]
     alg: Option<Algorithm>,
     x: String,
     crv: String,
@@ -255,8 +230,10 @@ pub(crate) struct Claims {
     /// Can be a single string or an array of strings in the JWT, always deserialized as Vec.
     #[serde(default, deserialize_with = "string_or_vec::deserialize")]
     aud: Option<Vec<String>>,
-    #[serde(default, alias = "roles")]
-    pub(crate) scope: Scopes,
+    #[serde(default)]
+    scope: Scopes,
+    #[serde(default)]
+    roles: Scopes,
 }
 
 impl Claims {
@@ -266,6 +243,52 @@ impl Claims {
                 "OAuth2 subject cannot be parsed as OpenADR clientId: {err}"
             ))
         })
+    }
+
+    /// Returns true if either the `scope` or `roles` claim contains the given scope.
+    pub(crate) fn has_scope(&self, scope: Scope) -> bool {
+        self.scope.contains(scope) || self.roles.contains(scope)
+    }
+
+    /// A read-only set of claims to use as the basis for mqtt object privacy.
+    pub(crate) fn temporary_claims_for_mqtt_ven(ven: &Ven) -> Self {
+        Self {
+            sub: ven.content.client_id.as_str().into(),
+            exp: 0,
+            iat: None,
+            nbf: None,
+            aud: None,
+            scope: vec![].into(),
+            roles: vec![Scope::ReadVenObjects, Scope::ReadTargets].into(),
+        }
+    }
+
+    /// Synthetic anonymous claims used when `PUBLIC_READS=true` allows
+    /// unauthenticated GET requests on the program and event read endpoints.
+    /// Grants `read_all` only. Never encoded into a JWT or used for writes.
+    pub(crate) fn anonymous_read_all() -> Self {
+        Self {
+            sub: "anonymous".into(),
+            exp: 0,
+            iat: None,
+            nbf: None,
+            aud: None,
+            scope: vec![Scope::ReadAll].into(),
+            roles: vec![].into(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_scopes(scopes: Vec<Scope>) -> Self {
+        Self {
+            sub: "test".into(),
+            exp: 0,
+            iat: None,
+            nbf: None,
+            aud: None,
+            scope: vec![].into(),
+            roles: scopes.into(),
+        }
     }
 }
 
@@ -312,8 +335,9 @@ impl<'de> Visitor<'de> for ScopesVisitor {
         A: de::SeqAccess<'de>,
     {
         let mut scopes = Vec::new();
-        while let Some(scope) = seq.next_element::<Scope>().transpose() {
-            match scope {
+        // First parse as String and only then attempt to parse as Scope
+        while let Some(scope_str) = seq.next_element::<String>()? {
+            match scope_str.parse::<Scope>() {
                 Ok(scope) => scopes.push(scope),
                 Err(err) => warn!("Ignoring invalid scope: {err}"),
             }
@@ -399,6 +423,7 @@ impl JwtManager {
             nbf: Some(now.timestamp()),
             aud,
             scope: scope.into(),
+            roles: Scopes::default(),
         };
 
         if let Some(encoding_key) = &self.encoding_key {
@@ -475,17 +500,17 @@ impl JwtManager {
     fn check_time(claims: Claims) -> Result<Claims, OAuthError> {
         let now = chrono::Utc::now().timestamp();
 
-        if let Some(nbf) = claims.nbf {
-            if now < nbf {
-                warn!("received token not yet valid: nbf={nbf} now={now}");
-                return Err(OAuthError {
-                    error: OAuthErrorType::NotYetValid,
-                    error_description: Some(
-                        "The 'nbf' claim disallows using this token already".to_string(),
-                    ),
-                    error_uri: None,
-                });
-            }
+        if let Some(nbf) = claims.nbf
+            && now < nbf
+        {
+            warn!("received token not yet valid: nbf={nbf} now={now}");
+            return Err(OAuthError {
+                error: OAuthErrorType::NotYetValid,
+                error_description: Some(
+                    "The 'nbf' claim disallows using this token already".to_string(),
+                ),
+                error_uri: None,
+            });
         };
 
         if claims.exp < now {
@@ -609,12 +634,56 @@ where
         let jwt_manager = Arc::<JwtManager>::from_ref(state);
 
         let Ok(claims) = jwt_manager.decode_and_validate(bearer.token()).await else {
-            return Err(AppError::Forbidden("Invalid authentication token provided"));
+            return Err(AppError::Auth(
+                "Invalid authentication token provided".to_string(),
+            ));
         };
 
         trace!(user = ?claims, "Extracted User from request");
 
         Ok(User(claims))
+    }
+}
+
+/// Returns true when the `PUBLIC_READS` environment variable enables anonymous reads.
+fn public_reads_enabled() -> bool {
+    std::env::var("PUBLIC_READS")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+        .unwrap_or(false)
+}
+
+/// Optional user extractor for the program and event GET endpoints.
+///
+/// - A valid Bearer token gives `MaybeUser(Some(user))` with the real claims.
+/// - A missing or invalid token gives `MaybeUser(None)` when `PUBLIC_READS=true`,
+///   and the normal authentication error otherwise.
+///
+/// SECURITY: only use this on read-only endpoints that may be public.
+/// Never use it on create, update or delete handlers.
+pub struct MaybeUser(pub(crate) Option<User>);
+
+impl MaybeUser {
+    /// The supplied user, or an anonymous `read_all` user when none was supplied.
+    pub(crate) fn into_user_or_anonymous(self) -> User {
+        self.0.unwrap_or_else(|| User(Claims::anonymous_read_all()))
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for MaybeUser
+where
+    Arc<JwtManager>: FromRef<S>,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        match User::from_request_parts(parts, state).await {
+            Ok(u) => Ok(MaybeUser(Some(u))),
+            Err(_) if public_reads_enabled() => {
+                trace!("PUBLIC_READS enabled and no valid Bearer token; treating as anonymous");
+                Ok(MaybeUser(None))
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -636,11 +705,13 @@ mod test {
                 Scope::ReadVenObjects,
                 Scope::WritePrograms,
                 Scope::WriteEvents,
-                Scope::WriteReports,
-                Scope::WriteSubscriptions,
+                Scope::WriteReportsBl,
+                Scope::WriteReportsVen,
+                Scope::WriteSubscriptionsBl,
+                Scope::WriteSubscriptionsVen,
                 Scope::WriteVensBl,
                 Scope::WriteVensVen,
-                Scope::WriteUsers,
+                Scope::WriteVensBl,
             ]
         }
     }
@@ -659,6 +730,59 @@ mod test {
             .await;
         assert_eq!(problem.detail, Some("OAuth2 subject cannot be parsed as OpenADR clientId: identifier contains characters besides [a-zA-Z0-9_-]: This is not a valid client ID".to_string()));
         assert_eq!(status_code, 401);
+    }
+
+    #[test]
+    fn check_both_scopes_and_roles() {
+        let claim = r#"{
+            "sub": "test",
+            "exp": 1,
+            "scope": ["read_targets"],
+            "roles": ["write_reports"]
+        }"#;
+        let claim = serde_json::from_str::<Claims>(claim).unwrap();
+        assert!(claim.has_scope(Scope::ReadTargets));
+        assert!(claim.has_scope(Scope::WriteReportsVen));
+    }
+
+    #[test]
+    fn missing_quote_does_not_timeout() {
+        let missing_quotes_around_scope = r#"{
+            "sub": "test",
+            "exp": 1,
+            "scope": [unquoted_value],
+        }"#;
+        let claim = serde_json::from_str::<Claims>(missing_quotes_around_scope);
+
+        // This is invalid JSON, but should not hang
+        let claim_error = claim.unwrap_err();
+        assert!(
+            claim_error
+                .to_string()
+                .starts_with("expected value at line")
+        );
+    }
+
+    #[test]
+    fn invalid_scope_is_ignored() {
+        let claim = r#"{
+            "sub": "test",
+            "exp": 1,
+            "scope": ["bogus"]
+        }"#;
+        let claim = serde_json::from_str::<Claims>(claim).unwrap();
+        assert_eq!(
+            claim,
+            Claims {
+                sub: "test".to_string(),
+                aud: None,
+                exp: 1,
+                iat: None,
+                nbf: None,
+                scope: crate::jwt::Scopes(Vec::with_capacity(0)),
+                roles: crate::jwt::Scopes(Vec::with_capacity(0)),
+            }
+        );
     }
 
     #[test]
@@ -684,7 +808,8 @@ mod test {
                 exp: 1,
                 iat: None,
                 nbf: None,
-                scope: crate::jwt::Scopes(Vec::with_capacity(0))
+                scope: crate::jwt::Scopes(Vec::with_capacity(0)),
+                roles: crate::jwt::Scopes(Vec::with_capacity(0)),
             }
         );
         assert_eq!(
@@ -695,7 +820,8 @@ mod test {
                 exp: 2,
                 iat: None,
                 nbf: None,
-                scope: crate::jwt::Scopes(Vec::with_capacity(0))
+                scope: crate::jwt::Scopes(Vec::with_capacity(0)),
+                roles: crate::jwt::Scopes(Vec::with_capacity(0)),
             }
         );
         assert_eq!(
@@ -706,7 +832,8 @@ mod test {
                 exp: 3,
                 iat: None,
                 nbf: None,
-                scope: crate::jwt::Scopes(Vec::with_capacity(0))
+                scope: crate::jwt::Scopes(Vec::with_capacity(0)),
+                roles: crate::jwt::Scopes(Vec::with_capacity(0)),
             }
         );
         assert_eq!(
@@ -717,8 +844,34 @@ mod test {
                 exp: 4,
                 iat: None,
                 nbf: None,
-                scope: crate::jwt::Scopes(Vec::with_capacity(0))
+                scope: crate::jwt::Scopes(Vec::with_capacity(0)),
+                roles: crate::jwt::Scopes(Vec::with_capacity(0)),
             }
         );
+    }
+
+    #[test]
+    fn anonymous_read_all_grants_only_read_all() {
+        let claims = Claims::anonymous_read_all();
+        assert!(claims.has_scope(Scope::ReadAll));
+        for scope in [
+            Scope::ReadTargets,
+            Scope::ReadVenObjects,
+            Scope::WritePrograms,
+            Scope::WriteEvents,
+            Scope::WriteVensBl,
+        ] {
+            assert!(
+                !claims.has_scope(scope),
+                "anonymous claims must not grant {scope:?}"
+            );
+        }
+        assert!(claims.client_id().is_ok_and(|c| c.as_str() == "anonymous"));
+    }
+
+    #[test]
+    fn maybe_user_without_token_resolves_to_anonymous() {
+        let crate::jwt::User(claims) = crate::jwt::MaybeUser(None).into_user_or_anonymous();
+        assert_eq!(claims, Claims::anonymous_read_all());
     }
 }

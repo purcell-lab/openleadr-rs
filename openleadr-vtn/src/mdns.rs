@@ -50,6 +50,12 @@ mod tests {
             mdns_service_type: "_openadr3._tcp.local.".to_string(),
             mdns_server_name: "test-vtn-instance".to_string(),
             mdns_base_path: "".to_string(),
+            mqtt_url: None,
+            mqtt_advertise_url: None,
+            mqtt_username: None,
+            mqtt_password: None,
+            mqtt_topic_prefix: String::new(),
+            mqtt_ca_path: None,
         };
 
         // Use a single daemon for both advertising and browsing so that we can reliably discover the service on localhost without network complexities.

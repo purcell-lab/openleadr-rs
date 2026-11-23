@@ -1,40 +1,41 @@
 use std::sync::Arc;
 
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::Deserialize;
 use tracing::{info, trace};
 use validator::Validate;
 
 use openleadr_wire::{
+    Event,
     event::{EventId, EventRequest},
     program::ProgramId,
     subscription::{AnyObject, Operation},
-    Event,
 };
 
 use crate::{
     api::{
-        subscription, subscription::NotifierState, AppResponse, TargetQueryParams, ValidatedJson,
-        ValidatedQuery,
+        AppResponse, TargetQueryParams, ValidatedJson, ValidatedQuery,
+        subscription::{self, NotifierState},
     },
-    data_source::EventCrud,
+    data_source::{EventCrud, VenCrud, VenObjectPrivacy},
     error::AppError,
-    jwt::{Scope, User},
+    jwt::{MaybeUser, Scope, User},
 };
 
 pub async fn get_all(
     State(event_source): State<Arc<dyn EventCrud>>,
     ValidatedQuery(query_params): ValidatedQuery<QueryParams>,
-    User(user): User,
+    maybe_user: MaybeUser,
 ) -> AppResponse<Vec<Event>> {
+    let User(user) = maybe_user.into_user_or_anonymous();
     trace!(?query_params);
-    let events = if user.scope.contains(Scope::ReadAll) {
+    let events = if user.has_scope(Scope::ReadAll) {
         event_source.retrieve_all(&query_params, &None).await?
-    } else if user.scope.contains(Scope::ReadTargets) {
+    } else if user.has_scope(Scope::ReadTargets) {
         event_source
             .retrieve_all(&query_params, &Some(user.client_id()?))
             .await?
@@ -51,11 +52,12 @@ pub async fn get_all(
 pub async fn get(
     State(event_source): State<Arc<dyn EventCrud>>,
     Path(id): Path<EventId>,
-    User(user): User,
+    maybe_user: MaybeUser,
 ) -> AppResponse<Event> {
-    let event = if user.scope.contains(Scope::ReadAll) {
+    let User(user) = maybe_user.into_user_or_anonymous();
+    let event = if user.has_scope(Scope::ReadAll) {
         event_source.retrieve(&id, &None).await?
-    } else if user.scope.contains(Scope::ReadTargets) {
+    } else if user.has_scope(Scope::ReadTargets) {
         event_source.retrieve(&id, &Some(user.client_id()?)).await?
     } else {
         return Err(AppError::Forbidden(
@@ -69,12 +71,14 @@ pub async fn get(
 }
 
 pub async fn add(
+    State(ven_source): State<Arc<dyn VenCrud>>,
     State(event_source): State<Arc<dyn EventCrud>>,
+    State(privacy): State<Arc<dyn VenObjectPrivacy>>,
     State(notifier_state): State<Arc<NotifierState>>,
     User(user): User,
     ValidatedJson(new_event): ValidatedJson<EventRequest>,
 ) -> Result<(StatusCode, Json<Event>), AppError> {
-    if !user.scope.contains(Scope::WriteEvents) {
+    if !user.has_scope(Scope::WriteEvents) {
         return Err(AppError::Forbidden("Missing 'write_events' scope"));
     }
 
@@ -85,7 +89,9 @@ pub async fn add(
     info!(%event.id, event_name=event.content.event_name, client_id = user.sub, "event created");
 
     subscription::notify(
+        &*ven_source,
         &*event_source,
+        &*privacy,
         &notifier_state,
         Operation::Create,
         AnyObject::Event(event.clone()),
@@ -96,13 +102,15 @@ pub async fn add(
 }
 
 pub async fn edit(
+    State(ven_source): State<Arc<dyn VenCrud>>,
     State(event_source): State<Arc<dyn EventCrud>>,
+    State(privacy): State<Arc<dyn VenObjectPrivacy>>,
     State(notifier_state): State<Arc<NotifierState>>,
     Path(id): Path<EventId>,
     User(user): User,
     ValidatedJson(content): ValidatedJson<EventRequest>,
 ) -> AppResponse<Event> {
-    if !user.scope.contains(Scope::WriteEvents) {
+    if !user.has_scope(Scope::WriteEvents) {
         return Err(AppError::Forbidden("Missing 'write_events' scope"));
     }
 
@@ -113,7 +121,9 @@ pub async fn edit(
     info!(%event.id, event_name=event.content.event_name, client_id = user.sub, "event updated");
 
     subscription::notify(
+        &*ven_source,
         &*event_source,
+        &*privacy,
         &notifier_state,
         Operation::Update,
         AnyObject::Event(event.clone()),
@@ -124,12 +134,14 @@ pub async fn edit(
 }
 
 pub async fn delete(
+    State(ven_source): State<Arc<dyn VenCrud>>,
     State(event_source): State<Arc<dyn EventCrud>>,
+    State(privacy): State<Arc<dyn VenObjectPrivacy>>,
     State(notifier_state): State<Arc<NotifierState>>,
     Path(id): Path<EventId>,
     User(user): User,
 ) -> AppResponse<Event> {
-    if !user.scope.contains(Scope::WriteEvents) {
+    if !user.has_scope(Scope::WriteEvents) {
         return Err(AppError::Forbidden("Missing 'write_events' scope"));
     }
 
@@ -137,7 +149,9 @@ pub async fn delete(
     info!(%event.id, event.event_name=event.content.event_name, client_id = user.sub, "deleted event");
 
     subscription::notify(
+        &*ven_source,
         &*event_source,
+        &*privacy,
         &notifier_state,
         Operation::Delete,
         AnyObject::Event(event.clone()),
@@ -169,7 +183,7 @@ fn get_50() -> i64 {
 #[cfg(test)]
 #[cfg(feature = "live-db-test")]
 mod test {
-    use crate::{data_source::PostgresStorage, state::AppState};
+    use crate::{VtnConfig, data_source::PostgresStorage, state::AppState};
     use std::str::FromStr;
 
     use super::*;
@@ -178,9 +192,9 @@ mod test {
     use crate::data_source::DataSource;
     // for `collect`
     use axum::{
+        Router,
         body::Body,
         http::{self, Request, Response, StatusCode},
-        Router,
     };
     use http_body_util::BodyExt;
     use openleadr_wire::{
@@ -264,7 +278,7 @@ mod test {
             assert_eq!(events[events.len() - 1].content, event)
         }
 
-        (AppState::new(store).await, events)
+        (AppState::new(store, &VtnConfig::from_env()).await, events)
     }
 
     async fn get_help(id: &str, token: &str, app: &mut Router) -> Response<Body> {
@@ -294,6 +308,7 @@ mod test {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let db_event: Event = serde_json::from_slice(&body).unwrap();
 
+        assert!(body.windows(10).any(|w| w == b"objectType"));
         assert_eq!(event, db_event);
     }
 
@@ -612,10 +627,12 @@ mod test {
                 .await;
 
             assert_eq!(status, StatusCode::BAD_REQUEST);
-            assert!(error
-                .detail
-                .unwrap()
-                .contains("outside of allowed range 1..=128"))
+            assert!(
+                error
+                    .detail
+                    .unwrap()
+                    .contains("outside of allowed range 1..=128")
+            )
         }
     }
 

@@ -1,23 +1,24 @@
 #[cfg(feature = "internal-oauth")]
-use crate::data_source::{postgres::user::PgAuthSource, AuthSource};
+use crate::data_source::{AuthSource, postgres::user::PgAuthSource};
 
 use super::{Migrate, VenObjectPrivacy};
 use crate::{
     data_source::{
+        DataSource, EventCrud, ProgramCrud, ReportCrud, ResourceCrud, ResourceGroupCrud, VenCrud,
         postgres::{
             event::PgEventStorage, program::PgProgramStorage, report::PgReportStorage,
-            subscription::PgSubscriptionStorage, ven::PgVenStorage,
+            resource_group::PgResourceGroupStorage, subscription::PgSubscriptionStorage,
+            ven::PgVenStorage,
         },
-        DataSource, EventCrud, ProgramCrud, ReportCrud, ResourceCrud, VenCrud,
     },
     error::AppError,
 };
 use async_trait::async_trait;
 use dotenvy::dotenv;
-use openleadr_wire::{target::Target, ClientId};
+use openleadr_wire::{ClientId, target::Target};
 use resource::PgResourceStorage;
 use serde::Serialize;
-use sqlx::{migrate::MigrateError, postgres::PgPoolOptions, PgPool};
+use sqlx::{PgPool, migrate::MigrateError, postgres::PgPoolOptions};
 use std::sync::Arc;
 use tracing::{error, info};
 
@@ -25,6 +26,7 @@ mod event;
 mod program;
 mod report;
 mod resource;
+mod resource_group;
 mod subscription;
 #[cfg(feature = "internal-oauth")]
 mod user;
@@ -58,6 +60,10 @@ impl DataSource for PostgresStorage {
 
     fn resources(&self) -> Arc<dyn ResourceCrud> {
         Arc::<PgResourceStorage>::new(self.db.clone().into())
+    }
+
+    fn resource_groups(&self) -> Arc<dyn ResourceGroupCrud> {
+        Arc::<PgResourceGroupStorage>::new(self.db.clone().into())
     }
 
     fn subscriptions(&self) -> Arc<dyn super::SubscriptionCrud> {

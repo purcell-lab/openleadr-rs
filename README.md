@@ -40,9 +40,14 @@ to produce a detailed OpenAPI specification of the VTN API we provide.
 
 ### First time setup
 
-Your machine needs a recent version of Rust installed.
-Please refer to the [official installation website](https://rustup.rs/) for instructions for your platform. To apply the database migrations, you also need the sqlx-cli installed.
-Simply run `cargo install sqlx-cli`. Additionally, you need `postgresql-client` installed (version 18 or newer).
+Your machine needs a recent version of Rust installed. Please refer to the
+[official installation website](https://rustup.rs/) for instructions for your
+platform. To apply the database migrations, you also need the sqlx-cli
+installed. Simply run `cargo install sqlx-cli`. Additionally, you need
+`postgresql-client` installed (version 18 or newer). Furthermore, compilation
+requires the presence of a C toolchain, CMAKE, and the OpenSSL library in a
+form suitable for source compilation. Consult your Linux distribution's
+documentation for information on how to install these.
 
 ### Docker compose
 
@@ -59,20 +64,38 @@ docker compose up -d    # start all other containers, i.e., the VTN
 Afterward, the VTN should be reachable at `http://localhost:3000`.
 
 For a more detailed guide,
-please refer to the Readmes in the [`./openleadr-client`](./openleadr-client) and
+please refer to the READMEs in the [`./openleadr-client`](./openleadr-client) and
 [`./openleadr-vtn`](./openleadr-vtn) directories.
 
 ## Supported features
 
-This repository contains only OpenADR 3.0, older versions are not supported.
+This repository contains only OpenADR 3.1, older versions are not supported.
 
 Currently, real-time updates via the webhook mechanism, known as subscriptions in the specification, are not supported.
 While we currently do not plan to add this ourselves, we warmly welcome any contribution or sponsoring to add it.
 See the [Contributing section](#contributing) if you are interested.
 
+MQTT is supported, but requires additional configuration of an MQTT broker.
+Please see the [vtn documentation](./openleadr-vtn/README.md#MQTT-support) for
+details and security considerations. The MQTT broker included in the the docker
+compose file should only be used for testing purposes and is _not_
+production-ready.
+MQTT is disabled when the `MQTT_URL`, `MQTT_USERNAME` and `MQTT_PASSWORD`
+environment variables are not set.
+
 The VTN implements its own OAuth provider, which is mainly relevant for testing and prototyping.
 Besides that, the VTN can also be configured to use a third-party OAuth provider,
 see the [documentation](./openleadr-vtn/README.md#internal-vs-external-oauth-provider) for details.
+
+Version 0.2.3 introduces resource groups. A resource group is nearly identical
+to a resource, with two key functional differences:
+1. It may contain more nested resource groups or VEN resources.
+2. It is managed by the BL role, not the VEN role, and thus has no VEN or client ID.
+
+Because of this nested structure, resource groups are well-suited for
+representing bottlenecks in the grid topology. A resource group can be seen by
+a VEN when the VEN owns a resource that is a child of that resource group or of
+a descendant resource group
 
 The client and server do support creating, retrieving, updating,
 and deleting programs, events, reports, VENs, and resources.
@@ -97,11 +120,11 @@ These tests are executed in GitHub Actions on every pull request.
 To execute them locally, run:
 
 ```bash
-docker compose up db -d     # start up a Postgres DB in the background
+docker compose up -d db mqtt     # start up a Postgres DB and MQTT broker in the background
 cargo sqlx migrate run # apply the DB scheme
 # load default credentials for integration testing of the client library
 psql -U openadr -W openadr -h localhost openadr < fixtures/users.sql
-cargo test --workspace      # execute the tests
+cargo test --workspace --features live-db-test      # execute the tests
 ```
 
 In addition to the tests we developed ourselves, there exists a test suite maintained by the OpenADR alliance.
@@ -109,9 +132,11 @@ As it is closed source, we cannot integrate this test suite with the CI, unfortu
 Nevertheless, we executed the tests locally to check for incompatibilities.
 Currently, all except for two of the 168 test cases that are applicable for us pass.
 
-The two failing test cases are a result of that we do the permission management a bit different from the specification.
-In particular, we do not allow VENs to delete their own reports but instead allow this to the business logic (BL).
-The two test cases assume the opposite, VENs should be able to delete reports, and BLs should not be able to.
+The two failing test cases are a result of the fact that we do the permission
+management a bit different from the specification. In particular, we do not
+allow VENs to delete their own reports but instead allow this to the business
+logic (BL). The two test cases assume the opposite, VENs should be able to
+delete reports, and BLs should not be able to.
 See also [#11](https://github.com/OpenLEADR/openleadr-rs/issues/11).
 
 The following screenshot shows the test results of the test suite from the OpenADR alliance,
@@ -146,7 +171,7 @@ and restart the setup afterwards with
 docker compose up
 ```
 
-For more details on the development of the components, see also the readme of the individual components.
+For more details on the development of the components, see also the README of the individual components.
 
 ## Contributing
 We expect you to follow our [code of conduct](CODE_OF_CONDUCT.md) for any contribution.

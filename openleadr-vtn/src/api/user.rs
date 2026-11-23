@@ -5,8 +5,8 @@ use crate::{
     jwt::{Scope, User},
 };
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -35,7 +35,7 @@ pub async fn get_all(
     State(auth_source): State<Arc<dyn AuthSource>>,
     User(user): User,
 ) -> AppResponse<Vec<UserDetails>> {
-    if !user.scope.contains(Scope::WriteUsers) {
+    if !user.has_scope(Scope::WriteUsers) {
         return Err(AppError::Forbidden("Missing 'write_users' scope"));
     }
 
@@ -50,7 +50,7 @@ pub async fn get(
     Path(id): Path<String>,
     User(user): User,
 ) -> AppResponse<UserDetails> {
-    if !user.scope.contains(Scope::WriteUsers) {
+    if !user.has_scope(Scope::WriteUsers) {
         return Err(AppError::Forbidden("Missing 'write_users' scope"));
     }
 
@@ -64,7 +64,7 @@ pub async fn add_user(
     User(user): User,
     ValidatedJson(new_user): ValidatedJson<NewUser>,
 ) -> Result<(StatusCode, Json<UserDetails>), AppError> {
-    if !user.scope.contains(Scope::WriteUsers) {
+    if !user.has_scope(Scope::WriteUsers) {
         return Err(AppError::Forbidden("Missing 'write_users' scope"));
     }
 
@@ -85,7 +85,7 @@ pub async fn add_credential(
     User(user): User,
     ValidatedJson(new): ValidatedJson<NewCredential>,
 ) -> AppResponse<UserDetails> {
-    if !user.scope.contains(Scope::WriteUsers) {
+    if !user.has_scope(Scope::WriteUsers) {
         return Err(AppError::Forbidden("Missing 'write_users' scope"));
     }
 
@@ -107,7 +107,7 @@ pub async fn edit(
     User(user): User,
     ValidatedJson(modified): ValidatedJson<NewUser>,
 ) -> AppResponse<UserDetails> {
-    if !user.scope.contains(Scope::WriteUsers) {
+    if !user.has_scope(Scope::WriteUsers) {
         return Err(AppError::Forbidden("Missing 'write_users' scope"));
     }
 
@@ -129,7 +129,7 @@ pub async fn delete_user(
     Path(id): Path<String>,
     User(user): User,
 ) -> AppResponse<UserDetails> {
-    if !user.scope.contains(Scope::WriteUsers) {
+    if !user.has_scope(Scope::WriteUsers) {
         return Err(AppError::Forbidden("Missing 'write_users' scope"));
     }
 
@@ -143,7 +143,7 @@ pub async fn delete_credential(
     Path((user_id, client_id)): Path<(String, String)>,
     User(user): User,
 ) -> AppResponse<UserDetails> {
-    if !user.scope.contains(Scope::WriteUsers) {
+    if !user.has_scope(Scope::WriteUsers) {
         return Err(AppError::Forbidden("Missing 'write_users' scope"));
     }
 
@@ -163,10 +163,10 @@ mod test {
     use super::*;
     use crate::api::test::{jwt_test_token, state};
     use axum::{
+        Router,
         body::Body,
         http,
-        http::{Request, Response, StatusCode},
-        Router,
+        http::{Request, Response, StatusCode, header},
     };
     use http_body_util::BodyExt;
     use sqlx::PgPool;
@@ -180,8 +180,8 @@ mod test {
             scope: vec![
                 Scope::ReadTargets,
                 Scope::ReadVenObjects,
-                Scope::WriteReports,
-                Scope::WriteSubscriptions,
+                Scope::WriteReportsVen,
+                Scope::WriteSubscriptionsVen,
                 Scope::WriteVensVen,
             ],
             client_ids: vec!["ven-client-client-id".parse().unwrap()],
@@ -199,6 +199,7 @@ mod test {
                 Scope::ReadAll,
                 Scope::WritePrograms,
                 Scope::WriteEvents,
+                Scope::WriteSubscriptionsBl,
                 Scope::WriteVensBl,
                 Scope::WriteUsers,
             ],
@@ -517,6 +518,10 @@ mod test {
 
         let response = help_login(&mut app, "bl-client", "bl-client").await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get(header::WWW_AUTHENTICATE).unwrap(),
+            r#"Bearer realm="VTN""#
+        );
     }
 
     #[sqlx::test(fixtures("users"))]
@@ -533,5 +538,9 @@ mod test {
 
         let response = help_login(&mut app, "bl-client", "bl-client").await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get(header::WWW_AUTHENTICATE).unwrap(),
+            r#"Bearer realm="VTN""#
+        );
     }
 }

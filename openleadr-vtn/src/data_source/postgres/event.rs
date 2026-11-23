@@ -1,19 +1,19 @@
 use crate::{
     api::event::QueryParams,
     data_source::{
-        postgres::{get_ven_targets, intersection, to_json_value},
         Crud, EventCrud,
+        postgres::{get_ven_targets, intersection, to_json_value},
     },
     error::AppError,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use openleadr_wire::{
+    ClientId, Event,
     event::{EventId, EventRequest, Priority},
     target::Target,
-    ClientId, Event,
 };
-use sqlx::{error::BoxDynError, PgPool};
+use sqlx::{PgPool, error::BoxDynError};
 use std::str::FromStr;
 use tracing::error;
 
@@ -472,17 +472,17 @@ mod tests {
     use std::str::FromStr;
 
     use crate::{
-        api::{event::QueryParams, TargetQueryParams},
-        data_source::{postgres::event::PgEventStorage, Crud},
+        api::{TargetQueryParams, event::QueryParams},
+        data_source::{Crud, postgres::event::PgEventStorage},
         error::AppError,
     };
     use chrono::{DateTime, Duration, Utc};
     use openleadr_wire::{
+        Event,
         event::{EventInterval, EventRequest, EventType, EventValuesMap},
         interval::IntervalPeriod,
         target::Target,
         values_map::Value,
-        Event,
     };
 
     impl Default for QueryParams {
@@ -889,16 +889,16 @@ mod tests {
             let repo: PgEventStorage = db.into();
 
             // Has access to targets "group-1" and "private-value"
-            // and via it's attached resources also to "somewhere-in-the-nowhere" and "group-2"
+            // and via its attached resources also to "somewhere-in-the-nowhere" and "group-2"
             let ven_1: ClientId = "ven-1-client-id".parse().unwrap();
 
             // event-3 has the target "somewhere-in-the-nowhere" which should be accessible to ven_1
             let events = repo
                 .retrieve_all(
                     &QueryParams {
-                        targets: TargetQueryParams(Some(vec!["somewhere-in-the-nowhere"
-                            .parse()
-                            .unwrap()])),
+                        targets: TargetQueryParams(Some(vec![
+                            "somewhere-in-the-nowhere".parse().unwrap(),
+                        ])),
                         ..Default::default()
                     },
                     &Some(ven_1.clone()),

@@ -1,13 +1,17 @@
 #[cfg(feature = "internal-oauth")]
 use crate::api::auth;
-use crate::data_source::SubscriptionCrud;
+use crate::{
+    VtnConfig,
+    api::subscription::MqttConfig,
+    data_source::{ResourceGroupCrud, SubscriptionCrud},
+};
 #[cfg(feature = "internal-oauth")]
 use crate::{api::user, data_source::AuthSource};
 #[cfg(feature = "internal-oauth")]
 use axum::routing::{delete, post};
 
 use crate::{
-    api::{event, healthcheck, program, report, resource, subscription, ven},
+    api::{event, healthcheck, program, report, resource, resource_group, subscription, ven},
     data_source::{
         DataSource, EventCrud, ProgramCrud, ReportCrud, ResourceCrud, VenCrud, VenObjectPrivacy,
     },
@@ -15,17 +19,15 @@ use crate::{
     jwt::JwtManager,
 };
 use axum::{
+    Json,
     extract::{FromRef, Request, State},
-    middleware,
-    middleware::Next,
+    middleware::{self, Next},
     response::IntoResponse,
     routing::get,
-    Json,
 };
 use base64::{
-    alphabet,
-    engine::{general_purpose::PAD, GeneralPurpose},
-    Engine,
+    Engine, alphabet,
+    engine::{GeneralPurpose, general_purpose::PAD},
 };
 #[cfg(feature = "internal-oauth")]
 use jsonwebtoken::EncodingKey;
@@ -42,7 +44,7 @@ use std::{
     sync::Arc,
 };
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Clone, FromRef)]
 pub struct AppState {
@@ -150,10 +152,10 @@ fn validation_from_key_type_and_env(key_type: &OAuthKeyType) -> Validation {
 
 #[cfg(feature = "internal-oauth")]
 fn internal_oauth_from_env(key_type: Option<OAuthKeyType>) -> JwtManager {
-    if let Some(k_type) = key_type {
-        if k_type != OAuthKeyType::Hmac {
-            panic!("Internal OAuth provider only supports HMAC JWT keys");
-        }
+    if let Some(k_type) = key_type
+        && k_type != OAuthKeyType::Hmac
+    {
+        panic!("Internal OAuth provider only supports HMAC JWT keys");
     }
 
     let secret = hmac_from_env().unwrap_or_else(|_| {
@@ -246,7 +248,9 @@ async fn external_oauth_from_env(key_type: Option<OAuthKeyType>) -> JwtManager {
 
     // If no decoding key was found, then OAUTH_JWKS_LOCATION must be used
     if key.is_none() && oauth_jwks_location.is_err() {
-        panic!("OAUTH_PEM or OAUTH_JWKS_LOCATION environment variable must be set for external OAuth provider with the given key type");
+        panic!(
+            "OAUTH_PEM or OAUTH_JWKS_LOCATION environment variable must be set for external OAuth provider with the given key type"
+        );
     }
 
     let token_url: Url = env::var("OAUTH_TOKEN_URL")
@@ -264,7 +268,7 @@ async fn external_oauth_from_env(key_type: Option<OAuthKeyType>) -> JwtManager {
 }
 
 impl AppState {
-    pub async fn new<S: DataSource>(storage: S) -> Self {
+    pub async fn new<S: DataSource>(storage: S, config: &VtnConfig) -> Self {
         let oauth_type: OAuthType = env::var("OAUTH_TYPE")
             .inspect_err(|_|{
             info!("Did not find OAUTH_TYPE environment variable, using internal OAuth provider.")}
@@ -280,16 +284,48 @@ impl AppState {
             OAuthType::Internal => internal_oauth_from_env(key_type),
             #[cfg(not(feature = "internal-oauth"))]
             OAuthType::Internal => {
-                panic!("Can't use internal OAuth provider as the 'internal-oauth' feature is disabled. \
+                panic!(
+                    "Can't use internal OAuth provider as the 'internal-oauth' feature is disabled. \
             Please recompile with the 'internal-oauth' feature enabled if you want to use it or set \
-            OAUTH_TYPE to EXTERNAL if you want to use an external OAuth provider.");
+            OAUTH_TYPE to EXTERNAL if you want to use an external OAuth provider."
+                );
             }
             OAuthType::External => external_oauth_from_env(key_type).await,
         };
 
-        let notifier = subscription::NotifierState::load_from_storage(&*storage.subscriptions())
-            .await
-            .expect("failed to retrieve subscriptions from database");
+        let mqtt_config = match (
+            &config.mqtt_url,
+            &config.mqtt_username,
+            &config.mqtt_password,
+        ) {
+            (Some(url), Some(username), Some(password)) => Some(MqttConfig {
+                url: url.clone(),
+                advertise_url: config.mqtt_advertise_url.clone().unwrap_or(url.clone()),
+                username: username.clone(),
+                password: password.clone(),
+                topic_prefix: config.mqtt_topic_prefix.clone(),
+                ca_path: config.mqtt_ca_path.clone(),
+            }),
+            (None, None, None) => None,
+            _ => panic!(
+                "Incomplete MQTT configuration. Expect all of the MQTT_URL, MQTT_USERNAME and MQTT_PASSWORD environment variables to be set when one of them is present."
+            ),
+        };
+
+        if let Some(mqtt_config) = &mqtt_config
+            && mqtt_config.ca_path.is_some()
+            && !paho_mqtt::is_secure_uri(&mqtt_config.url)
+        {
+            warn!(
+                "MQTT_CA_PATH is set but MQTT_URL ('{}') is not a secure URL. The CA certificate will not be used!",
+                mqtt_config.url
+            );
+        }
+
+        let notifier =
+            subscription::NotifierState::load_from_storage(&*storage.subscriptions(), mqtt_config)
+                .await
+                .expect("failed to retrieve subscriptions from database");
 
         Self {
             storage: Arc::new(storage),
@@ -322,6 +358,16 @@ impl AppState {
                 "/vens/{id}",
                 get(ven::get).put(ven::edit).delete(ven::delete),
             )
+            .route(
+                "/resource_groups",
+                get(resource_group::get_all).post(resource_group::add),
+            )
+            .route(
+                "/resource_groups/{id}",
+                get(resource_group::get)
+                    .put(resource_group::edit)
+                    .delete(resource_group::delete),
+            )
             .route("/resources", get(resource::get_all).post(resource::add))
             .route(
                 "/resources/{id}",
@@ -345,6 +391,9 @@ impl AppState {
         {
             router = router.route("/notifiers/ws", get(subscription::notifier_websocket_get));
         }
+        router = router
+            .nest("/notifiers/mqtt", subscription::mqtt_notifier())
+            .nest("/notifiers/push-mqtt", subscription::push_mqtt_notifier());
         #[cfg(feature = "internal-oauth")]
         {
             router = router
@@ -436,6 +485,12 @@ impl FromRef<AppState> for Arc<dyn ResourceCrud> {
     }
 }
 
+impl FromRef<AppState> for Arc<dyn ResourceGroupCrud> {
+    fn from_ref(state: &AppState) -> Self {
+        state.storage.resource_groups()
+    }
+}
+
 impl FromRef<AppState> for Arc<dyn SubscriptionCrud> {
     fn from_ref(state: &AppState) -> Self {
         state.storage.subscriptions()
@@ -445,8 +500,8 @@ impl FromRef<AppState> for Arc<dyn SubscriptionCrud> {
 #[cfg(test)]
 mod test {
     use openleadr_wire::{
-        subscription::{Subscription, SubscriptionId, SubscriptionRequest},
         ClientId,
+        subscription::{Subscription, SubscriptionId, SubscriptionRequest},
     };
 
     use crate::data_source::Crud;
@@ -476,6 +531,10 @@ mod test {
         }
 
         fn resources(&self) -> Arc<dyn ResourceCrud> {
+            unimplemented!()
+        }
+
+        fn resource_groups(&self) -> Arc<dyn ResourceGroupCrud> {
             unimplemented!()
         }
 
@@ -548,168 +607,172 @@ mod test {
 
     impl SubscriptionCrud for MockSubscriptionSource {}
 
+    // It is critical for the safety assumption of set_env_var and remove_env_var that the tests in
+    // this module do not run in parallel.
+    #[serial_test::serial]
     mod state_from_env_var {
         use super::*;
-        use serial_test::serial;
+
+        fn set_env_var(key: &str, value: &str) {
+            // SAFETY: env::set_var is used only in this module with `[serial_test::serial]`
+            unsafe {
+                env::set_var(key, value);
+            }
+        }
+
+        fn remove_env_var(key: &str) {
+            // SAFETY: env::remove_var is used only in this module with `[serial_test::serial]`
+            unsafe {
+                env::remove_var(key);
+            }
+        }
 
         fn clean_env() {
-            env::remove_var("OAUTH_BASE64_SECRET");
-            env::remove_var("OAUTH_TYPE");
-            env::remove_var("OAUTH_KEY_TYPE");
-            env::remove_var("OAUTH_PEM");
-            env::remove_var("OAUTH_JWKS_LOCATION");
-            env::remove_var("OAUTH_VALID_AUDIENCES");
+            remove_env_var("OAUTH_BASE64_SECRET");
+            remove_env_var("OAUTH_TYPE");
+            remove_env_var("OAUTH_KEY_TYPE");
+            remove_env_var("OAUTH_PEM");
+            remove_env_var("OAUTH_JWKS_LOCATION");
+            remove_env_var("OAUTH_VALID_AUDIENCES");
         }
 
         #[tokio::test]
         #[should_panic(expected = "OAUTH_BASE64_SECRET must have at least 32 bytes")]
-        #[serial]
         async fn internal_oauth_short_secret() {
             clean_env();
-            env::set_var("OAUTH_TOKEN_URL", "http://localhost:3000/auth/token");
-            env::set_var("OAUTH_BASE64_SECRET", "1234");
-            AppState::new(MockDataSource {}).await;
+            set_env_var("OAUTH_TOKEN_URL", "http://localhost:3000/auth/token");
+            set_env_var("OAUTH_BASE64_SECRET", "1234");
+            AppState::new(MockDataSource {}, &VtnConfig::from_env()).await;
         }
 
         #[tokio::test]
         #[should_panic(expected = "OAUTH_BASE64_SECRET contains invalid base64 string")]
-        #[serial]
         async fn internal_oauth_invalid_base64_secret() {
             clean_env();
-            env::set_var("OAUTH_TOKEN_URL", "http://localhost:3000/auth/token");
-            env::set_var("OAUTH_BASE64_SECRET", "&");
-            AppState::new(MockDataSource {}).await;
+            set_env_var("OAUTH_TOKEN_URL", "http://localhost:3000/auth/token");
+            set_env_var("OAUTH_BASE64_SECRET", "&");
+            AppState::new(MockDataSource {}, &VtnConfig::from_env()).await;
         }
 
         #[tokio::test]
-        #[serial]
         async fn implicit_internal_oauth() {
             clean_env();
-            env::set_var("OAUTH_TOKEN_URL", "http://localhost:3000/auth/token");
-            env::set_var(
+            set_env_var("OAUTH_TOKEN_URL", "http://localhost:3000/auth/token");
+            set_env_var(
                 "OAUTH_BASE64_SECRET",
                 "60QL3fluRYn/21n0zNoPe1np5aB6P9C75b0Nbkwu4FM=",
             );
-            AppState::new(MockDataSource {}).await;
+            AppState::new(MockDataSource {}, &VtnConfig::from_env()).await;
         }
 
         #[tokio::test]
-        #[serial]
         async fn explicit_internal_oauth() {
             clean_env();
-            env::set_var("OAUTH_TYPE", "INTERNAL");
-            env::set_var("OAUTH_TOKEN_URL", "http://localhost:3000/auth/token");
-            env::set_var(
+            set_env_var("OAUTH_TYPE", "INTERNAL");
+            set_env_var("OAUTH_TOKEN_URL", "http://localhost:3000/auth/token");
+            set_env_var(
                 "OAUTH_BASE64_SECRET",
                 "60QL3fluRYn/21n0zNoPe1np5aB6P9C75b0Nbkwu4FM=",
             );
-            AppState::new(MockDataSource {}).await;
+            AppState::new(MockDataSource {}, &VtnConfig::from_env()).await;
         }
 
         #[tokio::test]
-        #[serial]
         async fn explicit_internal_explicit_key_type_oauth() {
             clean_env();
-            env::set_var("OAUTH_TOKEN_URL", "http://localhost:3000/auth/token");
-            env::set_var("OAUTH_TYPE", "INTERNAL");
-            env::set_var("OAUTH_KEY_TYPE", "HMAC");
-            env::set_var(
+            set_env_var("OAUTH_TOKEN_URL", "http://localhost:3000/auth/token");
+            set_env_var("OAUTH_TYPE", "INTERNAL");
+            set_env_var("OAUTH_KEY_TYPE", "HMAC");
+            set_env_var(
                 "OAUTH_BASE64_SECRET",
                 "60QL3fluRYn/21n0zNoPe1np5aB6P9C75b0Nbkwu4FM=",
             );
-            AppState::new(MockDataSource {}).await;
+            AppState::new(MockDataSource {}, &VtnConfig::from_env()).await;
         }
 
         #[tokio::test]
         #[should_panic(expected = "Internal OAuth provider only supports HMAC JWT keys")]
-        #[serial]
         async fn explicit_internal_explicit_wrong_key_type_oauth() {
             clean_env();
-            env::set_var("OAUTH_TOKEN_URL", "http://localhost:3000/auth/token");
-            env::set_var("OAUTH_TYPE", "INTERNAL");
-            env::set_var("OAUTH_KEY_TYPE", "RSA");
-            env::set_var(
+            set_env_var("OAUTH_TOKEN_URL", "http://localhost:3000/auth/token");
+            set_env_var("OAUTH_TYPE", "INTERNAL");
+            set_env_var("OAUTH_KEY_TYPE", "RSA");
+            set_env_var(
                 "OAUTH_BASE64_SECRET",
                 "60QL3fluRYn/21n0zNoPe1np5aB6P9C75b0Nbkwu4FM=",
             );
-            AppState::new(MockDataSource {}).await;
+            AppState::new(MockDataSource {}, &VtnConfig::from_env()).await;
         }
 
         #[tokio::test]
         #[should_panic(
             expected = "Must specify key type for external OAuth provider. Use OAUTH_KEY_TYPE environment variable"
         )]
-        #[serial]
         async fn external_missing_key_type_oauth() {
             clean_env();
-            env::set_var("OAUTH_TOKEN_URL", "http://sometwhere/auth/token");
-            env::set_var("OAUTH_TYPE", "EXTERNAL");
-            env::set_var("OAUTH_VALID_AUDIENCES", "http://localhost:3000,");
-            env::set_var("OAUTH_PEM", "./tests/assets/public-rsa.pem");
-            AppState::new(MockDataSource {}).await;
+            set_env_var("OAUTH_TOKEN_URL", "http://sometwhere/auth/token");
+            set_env_var("OAUTH_TYPE", "EXTERNAL");
+            set_env_var("OAUTH_VALID_AUDIENCES", "http://localhost:3000,");
+            set_env_var("OAUTH_PEM", "./tests/assets/public-rsa.pem");
+            AppState::new(MockDataSource {}, &VtnConfig::from_env()).await;
         }
 
         #[tokio::test]
         #[should_panic(
             expected = "OAUTH_PEM or OAUTH_JWKS_LOCATION environment variable must be set for external OAuth provider with the given key type"
         )]
-        #[serial]
         async fn external_missing_jwks_location_oauth_and_oauth_pem() {
             clean_env();
-            env::set_var("OAUTH_TOKEN_URL", "http://sometwhere/auth/token");
-            env::set_var("OAUTH_TYPE", "EXTERNAL");
-            env::set_var("OAUTH_VALID_AUDIENCES", "http://localhost:3000,");
-            env::set_var("OAUTH_KEY_TYPE", "RSA");
-            AppState::new(MockDataSource {}).await;
+            set_env_var("OAUTH_TOKEN_URL", "http://sometwhere/auth/token");
+            set_env_var("OAUTH_TYPE", "EXTERNAL");
+            set_env_var("OAUTH_VALID_AUDIENCES", "http://localhost:3000,");
+            set_env_var("OAUTH_KEY_TYPE", "RSA");
+            AppState::new(MockDataSource {}, &VtnConfig::from_env()).await;
         }
 
         #[tokio::test]
-        #[serial]
         async fn external_missing_valid_audiences_oauth() {
             clean_env();
-            env::set_var("OAUTH_TOKEN_URL", "http://sometwhere/auth/token");
-            env::set_var("OAUTH_TYPE", "EXTERNAL");
-            env::set_var("OAUTH_KEY_TYPE", "RSA");
-            env::set_var("OAUTH_JWKS_LOCATION", "http://localhost:3000/jwks");
-            AppState::new(MockDataSource {}).await;
+            set_env_var("OAUTH_TOKEN_URL", "http://sometwhere/auth/token");
+            set_env_var("OAUTH_TYPE", "EXTERNAL");
+            set_env_var("OAUTH_KEY_TYPE", "RSA");
+            set_env_var("OAUTH_JWKS_LOCATION", "http://localhost:3000/jwks");
+            AppState::new(MockDataSource {}, &VtnConfig::from_env()).await;
         }
 
         #[tokio::test]
-        #[serial]
         async fn external_rsa() {
             clean_env();
-            env::set_var("OAUTH_TOKEN_URL", "http://sometwhere/auth/token");
-            env::set_var("OAUTH_TYPE", "EXTERNAL");
-            env::set_var("OAUTH_KEY_TYPE", "RSA");
-            env::set_var("OAUTH_JWKS_LOCATION", "http://localhost:3000/jwks");
-            env::set_var("OAUTH_VALID_AUDIENCES", "http://localhost:3000,");
-            AppState::new(MockDataSource {}).await;
+            set_env_var("OAUTH_TOKEN_URL", "http://sometwhere/auth/token");
+            set_env_var("OAUTH_TYPE", "EXTERNAL");
+            set_env_var("OAUTH_KEY_TYPE", "RSA");
+            set_env_var("OAUTH_JWKS_LOCATION", "http://localhost:3000/jwks");
+            set_env_var("OAUTH_VALID_AUDIENCES", "http://localhost:3000,");
+            AppState::new(MockDataSource {}, &VtnConfig::from_env()).await;
         }
 
         #[tokio::test]
         #[should_panic(expected = "Cannot read EC key: Error(InvalidKeyFormat)")]
-        #[serial]
         async fn external_provide_rsa_key_instead_of_ec() {
             clean_env();
-            env::set_var("OAUTH_TOKEN_URL", "http://sometwhere/auth/token");
-            env::set_var("OAUTH_TYPE", "EXTERNAL");
-            env::set_var("OAUTH_KEY_TYPE", "EC");
-            env::set_var("OAUTH_VALID_AUDIENCES", "http://localhost:3000,");
-            env::set_var("OAUTH_PEM", "./tests/assets/public-rsa.pem");
-            AppState::new(MockDataSource {}).await;
+            set_env_var("OAUTH_TOKEN_URL", "http://sometwhere/auth/token");
+            set_env_var("OAUTH_TYPE", "EXTERNAL");
+            set_env_var("OAUTH_KEY_TYPE", "EC");
+            set_env_var("OAUTH_VALID_AUDIENCES", "http://localhost:3000,");
+            set_env_var("OAUTH_PEM", "./tests/assets/public-rsa.pem");
+            AppState::new(MockDataSource {}, &VtnConfig::from_env()).await;
         }
 
         #[tokio::test]
         #[should_panic(expected = "Cannot read Ed key: Error(InvalidKeyFormat)")]
-        #[serial]
         async fn external_provide_rsa_key_instead_of_ed() {
             clean_env();
-            env::set_var("OAUTH_TOKEN_URL", "http://sometwhere/auth/token");
-            env::set_var("OAUTH_TYPE", "EXTERNAL");
-            env::set_var("OAUTH_KEY_TYPE", "ED");
-            env::set_var("OAUTH_VALID_AUDIENCES", "http://localhost:3000,");
-            env::set_var("OAUTH_PEM", "./tests/assets/public-rsa.pem");
-            AppState::new(MockDataSource {}).await;
+            set_env_var("OAUTH_TOKEN_URL", "http://sometwhere/auth/token");
+            set_env_var("OAUTH_TYPE", "EXTERNAL");
+            set_env_var("OAUTH_KEY_TYPE", "ED");
+            set_env_var("OAUTH_VALID_AUDIENCES", "http://localhost:3000,");
+            set_env_var("OAUTH_PEM", "./tests/assets/public-rsa.pem");
+            AppState::new(MockDataSource {}, &VtnConfig::from_env()).await;
         }
     }
 }

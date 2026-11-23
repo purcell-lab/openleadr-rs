@@ -4,9 +4,9 @@ use chrono::{DateTime, Utc};
 use tracing::warn;
 
 use openleadr_wire::{
+    Program,
     event::{EventRequest, EventValuesMap, Priority},
     interval::IntervalPeriod,
-    Program,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +39,7 @@ impl Timeline {
         }
     }
 
-    /// Creates a [`Timeline`] form a [`Program`], and the [`Event`](crate::Event)s that belong to it.
+    /// Creates a [`Timeline`] from a [`Program`], and the [`Event`](crate::Event)s that belong to it.
     ///
     /// It sorts events according to their priority and builds the timeline accordingly.
     /// The timeline can have gaps if the intervals in the events contain gaps.

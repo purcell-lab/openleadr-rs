@@ -1,17 +1,18 @@
 use crate::{
     api::ven::QueryParams,
-    data_source::{postgres::to_json_value, Crud, VenCrud, VenObjectPrivacy},
+    data_source::{Crud, VenCrud, VenObjectPrivacy, postgres::to_json_value},
     error::AppError,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use openleadr_wire::{
+    ClientId,
+    resource_group::ResourceGroupId,
     target::Target,
     ven::{BlVenRequest, Ven, VenId},
-    ClientId,
 };
 use sqlx::PgPool;
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 use tracing::{error, trace, warn};
 
 impl VenCrud for PgVenStorage {}
@@ -202,15 +203,15 @@ impl Crud for PgVenStorage {
         .fetch_one(&mut *tx)
         .await?;
 
-        if let Some(client_id) = client_id {
-            if old.client_id != client_id.as_str() {
-                warn!(
-                    client_id = ?client_id,
-                    ven_id = id.as_str(),
-                    "Client tried to update VEN it does not own"
-                );
-                return Err(Self::Error::NotFound);
-            }
+        if let Some(client_id) = client_id
+            && old.client_id != client_id.as_str()
+        {
+            warn!(
+                client_id = ?client_id,
+                ven_id = id.as_str(),
+                "Client tried to update VEN it does not own"
+            );
+            return Err(Self::Error::NotFound);
         }
 
         if old.client_id != new.client_id.as_str() {
@@ -258,9 +259,29 @@ impl Crud for PgVenStorage {
     async fn delete(
         &self,
         id: &Self::Id,
-        _client_id: &Self::PermissionFilter,
+        client_id: &Self::PermissionFilter,
     ) -> Result<Self::Type, Self::Error> {
         let mut tx = self.db.begin().await?;
+
+        let owner = sqlx::query!(
+            r#"
+            SELECT client_id FROM ven WHERE id = $1
+            "#,
+            id.as_str()
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if let Some(client_id) = client_id
+            && owner.client_id != client_id.as_str()
+        {
+            warn!(
+                client_id = ?client_id,
+                ven_id = id.as_str(),
+                "Client tried to delete VEN it does not own"
+            );
+            return Err(Self::Error::NotFound);
+        }
 
         let resource_id = sqlx::query_scalar!(
             r#"
@@ -316,12 +337,9 @@ impl VenObjectPrivacy for PgVenStorage {
             client_id.as_str()
         )
         .fetch_one(&self.db)
-        .await?
-        .into_iter()
-        .map(|id| id.parse())
-        .collect::<Result<BTreeSet<_>, _>>()?;
+        .await?;
 
-        let full_targets: Result<_, AppError> = sqlx::query_scalar!(
+        let resource_targets = sqlx::query_scalar!(
             r#"
             SELECT resource.targets
             FROM ven
@@ -331,18 +349,57 @@ impl VenObjectPrivacy for PgVenStorage {
             client_id.as_str()
         )
         .fetch_all(&self.db)
-        .await?
-        .into_iter()
-        .try_fold(ven_targets, |mut set, resource_targets| {
-            let mut resource_set = resource_targets
-                .into_iter()
-                .map(|target| target.parse())
-                .collect::<Result<BTreeSet<Target>, _>>()?;
-            set.append(&mut resource_set);
-            Ok(set)
-        });
+        .await?;
 
-        Ok(full_targets?.into_iter().collect())
+        // If a resource owned by a ven with matching client_id is a descendant of a certain resource group,
+        // also include that resource group's targets
+        let resource_group_targets = sqlx::query_scalar!(
+            r#"
+             SELECT DISTINCT rg.targets
+             FROM rg_family AS fam
+             INNER JOIN rg_child_ven_resource AS rcvr ON fam.id = rcvr.rg_parent_rg_id
+             INNER JOIN resource AS r ON rcvr.rg_child_ven_resource_id = r.id
+             INNER JOIN ven AS v ON r.ven_id = v.id
+             INNER JOIN resource_group rg on fam.root = rg.id
+             WHERE v.client_id = $1
+            "#,
+            client_id.as_str()
+        )
+        .fetch_all(&self.db)
+        .await?;
+
+        let unique_targets = ven_targets
+            .into_iter()
+            .chain(resource_targets.into_iter().flatten())
+            .chain(resource_group_targets.into_iter().flatten())
+            .map(|target| target.parse())
+            .collect::<Result<HashSet<_>, _>>()?;
+
+        Ok(unique_targets.into_iter().collect())
+    }
+
+    async fn resource_group_visible_for_client(
+        &self,
+        client_id: &ClientId,
+        resource_group_id: &ResourceGroupId,
+    ) -> Result<bool, AppError> {
+        Ok(sqlx::query_scalar!(
+            r#"
+            SELECT EXISTS (
+                SELECT r.id FROM resource r
+                INNER JOIN rg_child_ven_resource rcvr
+                    ON rcvr.rg_child_ven_resource_id = r.id
+                INNER JOIN rg_family rg_fam
+                    ON rg_fam.id = rcvr.rg_parent_rg_id
+                WHERE r.ven_id = (SELECT v.id FROM ven v WHERE v.client_id = $2)
+                    AND rg_fam.root = $1
+            ) AS "exists!"
+            "#,
+            resource_group_id.as_str(),
+            client_id.as_str()
+        )
+        .fetch_one(&self.db)
+        .await?)
     }
 
     async fn ven_id_by_client_id(&self, client_id: &ClientId) -> Result<Option<VenId>, AppError> {
@@ -363,8 +420,8 @@ impl VenObjectPrivacy for PgVenStorage {
 #[cfg(feature = "live-db-test")]
 mod tests {
     use crate::{
-        api::{ven::QueryParams, TargetQueryParams},
-        data_source::{postgres::ven::PgVenStorage, Crud},
+        api::{TargetQueryParams, ven::QueryParams},
+        data_source::{Crud, VenObjectPrivacy, postgres::ven::PgVenStorage},
         error::AppError,
     };
     use openleadr_wire::{
@@ -414,6 +471,41 @@ mod tests {
                 vec!["group-2".parse().unwrap()],
             ),
         }
+    }
+
+    #[sqlx::test(fixtures("vens", "resources", "resource_groups"))]
+    async fn resource_group_targeting(db: PgPool) {
+        let repo: PgVenStorage = db.into();
+        let client_id = "ven-1-client-id".parse().unwrap();
+        let targets = repo.targets_by_client_id(&client_id).await.unwrap();
+
+        assert_eq!(targets.len(), 4);
+        for target in [
+            "group-1",
+            "group-2",
+            "somewhere-in-the-nowhere",
+            "private-value",
+        ] {
+            assert!(targets.contains(&target.parse().unwrap()))
+        }
+
+        let client_id = "ven-2-client-id".parse().unwrap();
+        let targets = repo.targets_by_client_id(&client_id).await.unwrap();
+
+        assert_eq!(targets.len(), 3);
+        for target in ["group-1", "group-2", "somewhere-in-the-nowhere"] {
+            assert!(targets.contains(&target.parse().unwrap()))
+        }
+
+        let client_id = "ven-3-client-id".parse().unwrap();
+        let targets = repo.targets_by_client_id(&client_id).await.unwrap();
+
+        assert_eq!(targets.as_slice(), ["group-1".parse().unwrap()]);
+
+        let client_id = "ven-has-no-targets-client-id".parse().unwrap();
+        let targets = repo.targets_by_client_id(&client_id).await.unwrap();
+
+        assert!(targets.is_empty());
     }
 
     mod get_all {

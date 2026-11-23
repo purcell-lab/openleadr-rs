@@ -46,21 +46,25 @@ sqlx = { workspace = true, optional = true }
 argon2 = { workspace = true, optional = true }
 dotenvy = { workspace = true, optional = true }
 mdns-sd = { workspace = true, optional = true }
+paho-mqtt.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
+futures.workspace = true
+tokio-tungstenite.workspace = true
 serial_test.workspace = true
 serde_html_form = "0.4.0"
 openleadr-client = { path = "../openleadr-client" }
 
 [features]
-default = ["postgres", "compression-br", "compression-deflate", "compression-gzip", "compression-zstd"]
+default = ["postgres", "compression-br", "compression-deflate", "compression-gzip", "compression-zstd", "experimental-websockets"]
 live-db-test = ["postgres", "internal-oauth"]
 postgres = ["sqlx/postgres", "dep:dotenvy", "dep:argon2"]
 internal-oauth = []
-mdns = ["dep:mdns-sd"]
+mdns = ["dep:mdns-sd", "openleadr-client/mdns"]
 experimental-websockets = ["axum/ws"] # object privacy is not yet implemented
 compression-br = ["tower-http/compression-br"]
 compression-deflate = ["tower-http/compression-deflate"]
 compression-gzip = ["tower-http/compression-gzip"]
 compression-zstd = ["tower-http/compression-zstd"]
+vendored-ssl = ["paho-mqtt/vendored-ssl"]

@@ -9,8 +9,8 @@ use serde_with::{serde_as, skip_serializing_none};
 use validator::Validate;
 
 use crate::{
-    program::ProgramId, resource::Resource, ClientId, Event, Identifier, IdentifierError,
-    ObjectType, Program, Report, Ven,
+    ClientId, Event, Identifier, IdentifierError, ObjectType, Program, Report, Ven,
+    program::ProgramId, resource::Resource, resource_group::ResourceGroup,
 };
 
 /// Server provided representation of subscription
@@ -119,7 +119,7 @@ impl FromStr for SubscriptionId {
     }
 }
 
-///  VTN generated object included in request to subscription callbackUrl.
+/// VTN generated object included in request to subscription callbackUrl.
 #[skip_serializing_none]
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
@@ -148,6 +148,21 @@ pub struct Notification {
     // pub targets: Vec<Target>,
 }
 
+#[skip_serializing_none]
+#[serde_as]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct MqttPushNotification {
+    #[serde(rename = "ID")]
+    pub id: Identifier,
+    #[serde(rename = "notificationID")]
+    pub notification_id: Identifier,
+    pub object_type: ObjectType,
+    pub operation: Operation,
+    #[serde(with = "crate::serde_rfc3339")]
+    pub notification_date_time: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "objectType", content = "object", rename_all = "UPPERCASE")]
 pub enum AnyObject {
@@ -157,6 +172,7 @@ pub enum AnyObject {
     Subscription(Subscription),
     Ven(Ven),
     Resource(Resource),
+    ResourceGroup(ResourceGroup),
 }
 
 impl AnyObject {
@@ -168,6 +184,7 @@ impl AnyObject {
             AnyObject::Subscription(subscription) => subscription.id.0.clone(),
             AnyObject::Ven(ven) => ven.id.0.clone(),
             AnyObject::Resource(resource) => resource.id.0.clone(),
+            AnyObject::ResourceGroup(resource_group) => resource_group.id.0.clone(),
         }
     }
 
@@ -179,6 +196,7 @@ impl AnyObject {
             AnyObject::Subscription(_) => ObjectType::Subscription,
             AnyObject::Ven(_) => ObjectType::Ven,
             AnyObject::Resource(_) => ObjectType::Resource,
+            AnyObject::ResourceGroup(_) => ObjectType::ResourceGroup,
         }
     }
 }
@@ -186,9 +204,73 @@ impl AnyObject {
 /// Provides details of each notifier binding supported
 #[skip_serializing_none]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
-#[serde(rename_all = "UPPERCASE")]
+#[serde(rename_all = "SCREAMING-KEBAB-CASE")]
 pub struct NotifiersResponse {
     pub websocket: bool,
+    pub mqtt: Option<MqttNotifierBindingObject>,
+    pub push_mqtt: Option<MqttNotifierBindingObject>,
+}
+
+/// Details of MQTT binding for messaging protocol support
+#[skip_serializing_none]
+#[serde_as]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct MqttNotifierBindingObject {
+    /// URIs for connection to MQTT broker
+    #[serde(rename = "URIS")]
+    pub uris: Vec<String>,
+    /// Currently always JSON, perhaps other formats supported in future
+    pub serialization: SerializationType,
+    pub authentication: MqttNotifierAuthentication,
+}
+
+/// MQTT broker authentication details
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE", rename_all_fields = "camelCase")]
+#[serde(tag = "method")]
+pub enum MqttNotifierAuthentication {
+    /// Specifies anonymous authentication
+    Anonymous,
+    /// Specifies OAuth2 bearer token authentication
+    Oauth2BearerToken {
+        /// Either the distinguished string "{clientID}", or any other literal string
+        username: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum SerializationType {
+    Json,
+}
+
+/// Details of MQTT binding for messaging protocol support
+#[skip_serializing_none]
+#[serde_as]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotifierTopicsResponse {
+    pub topics: NotifierOperationsTopics,
+}
+
+/// MQTT notifier topic names for notifications of subscribable-object operations
+#[skip_serializing_none]
+#[serde_as]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub struct NotifierOperationsTopics {
+    /// Topic path for CREATE operations,
+    /// not provided for notifications for a specific object ID,
+    /// e.g. until programID foo is created, clients unable to
+    /// request notifications of its creation'
+    pub create: Option<String>,
+    /// Topic path for UPDATE operations
+    pub update: String,
+    /// Topic path for DELETE operations
+    pub delete: String,
+    /// Topic path for ALL operations, if supported by VTN
+    pub all: Option<String>,
 }
 
 #[cfg(test)]

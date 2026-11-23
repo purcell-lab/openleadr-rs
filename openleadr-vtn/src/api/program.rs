@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -11,29 +11,30 @@ use validator::Validate;
 
 use crate::{
     api::{
-        subscription, subscription::NotifierState, AppResponse, TargetQueryParams, ValidatedJson,
-        ValidatedQuery,
+        AppResponse, TargetQueryParams, ValidatedJson, ValidatedQuery, subscription,
+        subscription::NotifierState,
     },
-    data_source::{EventCrud, ProgramCrud},
+    data_source::{EventCrud, ProgramCrud, VenCrud, VenObjectPrivacy},
     error::AppError,
-    jwt::{Scope, User},
+    jwt::{MaybeUser, Scope, User},
 };
 use openleadr_wire::{
+    Program,
     program::{ProgramId, ProgramRequest},
     subscription::{AnyObject, Operation},
-    Program,
 };
 
 pub async fn get_all(
     State(program_source): State<Arc<dyn ProgramCrud>>,
     ValidatedQuery(query_params): ValidatedQuery<QueryParams>,
-    User(user): User,
+    maybe_user: MaybeUser,
 ) -> AppResponse<Vec<Program>> {
+    let User(user) = maybe_user.into_user_or_anonymous();
     trace!(?query_params);
 
-    let programs = if user.scope.contains(Scope::ReadAll) {
+    let programs = if user.has_scope(Scope::ReadAll) {
         program_source.retrieve_all(&query_params, &None).await?
-    } else if user.scope.contains(Scope::ReadTargets) {
+    } else if user.has_scope(Scope::ReadTargets) {
         program_source
             .retrieve_all(&query_params, &Some(user.client_id()?))
             .await?
@@ -55,11 +56,12 @@ pub async fn get_all(
 pub async fn get(
     State(program_source): State<Arc<dyn ProgramCrud>>,
     Path(id): Path<ProgramId>,
-    User(user): User,
+    maybe_user: MaybeUser,
 ) -> AppResponse<Program> {
-    let program = if user.scope.contains(Scope::ReadAll) {
+    let User(user) = maybe_user.into_user_or_anonymous();
+    let program = if user.has_scope(Scope::ReadAll) {
         program_source.retrieve(&id, &None).await?
-    } else if user.scope.contains(Scope::ReadTargets) {
+    } else if user.has_scope(Scope::ReadTargets) {
         program_source
             .retrieve(&id, &Some(user.client_id()?))
             .await?
@@ -80,13 +82,15 @@ pub async fn get(
 }
 
 pub async fn add(
+    State(ven_source): State<Arc<dyn VenCrud>>,
     State(event_source): State<Arc<dyn EventCrud>>,
+    State(privacy): State<Arc<dyn VenObjectPrivacy>>,
     State(program_source): State<Arc<dyn ProgramCrud>>,
     State(notifier_state): State<Arc<NotifierState>>,
     User(user): User,
     ValidatedJson(new_program): ValidatedJson<ProgramRequest>,
 ) -> Result<(StatusCode, Json<Program>), AppError> {
-    if !user.scope.contains(Scope::WritePrograms) {
+    if !user.has_scope(Scope::WritePrograms) {
         return Err(AppError::Forbidden("Missing 'write_programs' scope"));
     }
 
@@ -102,7 +106,9 @@ pub async fn add(
     );
 
     subscription::notify(
+        &*ven_source,
         &*event_source,
+        &*privacy,
         &notifier_state,
         Operation::Create,
         AnyObject::Program(program.clone()),
@@ -112,15 +118,21 @@ pub async fn add(
     Ok((StatusCode::CREATED, Json(program)))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Handler which uses many aspects of the state"
+)]
 pub async fn edit(
+    State(ven_source): State<Arc<dyn VenCrud>>,
     State(event_source): State<Arc<dyn EventCrud>>,
+    State(privacy): State<Arc<dyn VenObjectPrivacy>>,
     State(program_source): State<Arc<dyn ProgramCrud>>,
     State(notifier_state): State<Arc<NotifierState>>,
     Path(id): Path<ProgramId>,
     User(user): User,
     ValidatedJson(content): ValidatedJson<ProgramRequest>,
 ) -> AppResponse<Program> {
-    if !user.scope.contains(Scope::WritePrograms) {
+    if !user.has_scope(Scope::WritePrograms) {
         return Err(AppError::Forbidden("Missing 'write_programs' scope"));
     }
 
@@ -136,7 +148,9 @@ pub async fn edit(
     );
 
     subscription::notify(
+        &*ven_source,
         &*event_source,
+        &*privacy,
         &notifier_state,
         Operation::Update,
         AnyObject::Program(program.clone()),
@@ -147,13 +161,15 @@ pub async fn edit(
 }
 
 pub async fn delete(
+    State(ven_source): State<Arc<dyn VenCrud>>,
     State(event_source): State<Arc<dyn EventCrud>>,
+    State(privacy): State<Arc<dyn VenObjectPrivacy>>,
     State(program_source): State<Arc<dyn ProgramCrud>>,
     State(notifier_state): State<Arc<NotifierState>>,
     Path(id): Path<ProgramId>,
     User(user): User,
 ) -> AppResponse<Program> {
-    if !user.scope.contains(Scope::WritePrograms) {
+    if !user.has_scope(Scope::WritePrograms) {
         return Err(AppError::Forbidden("Missing 'write_programs' scope"));
     }
 
@@ -161,7 +177,9 @@ pub async fn delete(
     info!(%id, client_id = user.sub, "deleted program");
 
     subscription::notify(
+        &*ven_source,
         &*event_source,
+        &*privacy,
         &notifier_state,
         Operation::Delete,
         AnyObject::Program(program.clone()),
@@ -190,7 +208,7 @@ fn get_50() -> i64 {
 #[cfg(test)]
 #[cfg(feature = "live-db-test")]
 mod test {
-    use crate::{data_source::PostgresStorage, state::AppState};
+    use crate::{VtnConfig, data_source::PostgresStorage, state::AppState};
     use std::str::FromStr;
 
     use crate::api::test::*;
@@ -198,9 +216,9 @@ mod test {
     use super::*;
     use crate::data_source::DataSource;
     use axum::{
+        Router,
         body::Body,
         http::{self, Request, Response, StatusCode},
-        Router,
     };
     use http_body_util::BodyExt;
     use openleadr_wire::{problem::Problem, target::Target};
@@ -251,7 +269,7 @@ mod test {
             programs.push(p);
         }
 
-        (AppState::new(store).await, programs)
+        (AppState::new(store, &VtnConfig::from_env()).await, programs)
     }
 
     async fn help_get(app: &mut Router, token: &str, id: &str) -> Response<Body> {

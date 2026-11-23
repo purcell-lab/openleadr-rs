@@ -10,7 +10,7 @@
 pub use event::Event;
 pub use program::Program;
 pub use report::Report;
-use serde::{de::Unexpected, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Unexpected};
 use std::{fmt::Display, str::FromStr};
 pub use ven::Ven;
 
@@ -21,6 +21,7 @@ pub mod problem;
 pub mod program;
 pub mod report;
 pub mod resource;
+pub mod resource_group;
 pub mod subscription;
 pub mod target;
 pub mod values_map;
@@ -151,6 +152,7 @@ pub enum ObjectType {
     Subscription,
     Ven,
     Resource,
+    ResourceGroup,
 }
 
 impl ObjectType {
@@ -162,6 +164,7 @@ impl ObjectType {
             ObjectType::Subscription => "SUBSCRIPTION",
             ObjectType::Ven => "VEN",
             ObjectType::Resource => "RESOURCE",
+            ObjectType::ResourceGroup => "RESOURCE_GROUP",
         }
     }
 }
@@ -518,10 +521,12 @@ mod tests {
             serde_json::from_str::<Identifier>(r#""example-999""#).unwrap(),
             Identifier("example-999".to_string())
         );
-        assert!(serde_json::from_str::<Identifier>(r#""þingvellir-999""#)
-            .unwrap_err()
-            .to_string()
-            .contains("identifier contains characters besides"));
+        assert!(
+            serde_json::from_str::<Identifier>(r#""þingvellir-999""#)
+                .unwrap_err()
+                .to_string()
+                .contains("identifier contains characters besides")
+        );
 
         let long = "x".repeat(128);
         assert_eq!(
@@ -537,10 +542,12 @@ mod tests {
                 .contains("string length 129 outside of allowed range 1..=128")
         );
 
-        assert!(serde_json::from_str::<Identifier>("\"\"")
-            .unwrap_err()
-            .to_string()
-            .contains("string length 0 outside of allowed range 1..=128"));
+        assert!(
+            serde_json::from_str::<Identifier>("\"\"")
+                .unwrap_err()
+                .to_string()
+                .contains("string length 0 outside of allowed range 1..=128")
+        );
     }
 
     #[test]
@@ -559,15 +566,19 @@ mod tests {
         );
 
         let too_long = "x".repeat(129);
-        assert!(serde_json::from_str::<Test>(&format!("\"{too_long}\""))
-            .unwrap_err()
-            .to_string()
-            .contains("string length 129 outside of allowed range 1..=128"));
+        assert!(
+            serde_json::from_str::<Test>(&format!("\"{too_long}\""))
+                .unwrap_err()
+                .to_string()
+                .contains("string length 129 outside of allowed range 1..=128")
+        );
 
-        assert!(serde_json::from_str::<Test>("\"\"")
-            .unwrap_err()
-            .to_string()
-            .contains("string length 0 outside of allowed range 1..=128"));
+        assert!(
+            serde_json::from_str::<Test>("\"\"")
+                .unwrap_err()
+                .to_string()
+                .contains("string length 0 outside of allowed range 1..=128")
+        );
     }
 
     #[test]
@@ -617,10 +628,12 @@ mod tests {
         ];
 
         for invalid in invalid_dates {
-            assert!(serde_json::from_str::<Test>(&format!("\"{invalid}\""))
-                .unwrap_err()
-                .to_string()
-                .contains("Invalid RFC3339 string"));
+            assert!(
+                serde_json::from_str::<Test>(&format!("\"{invalid}\""))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Invalid RFC3339 string")
+            );
         }
     }
 }

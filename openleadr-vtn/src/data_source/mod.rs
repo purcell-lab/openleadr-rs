@@ -5,14 +5,15 @@ use crate::{error::AppError, jwt::Scope};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use openleadr_wire::{
+    ClientId, Event, Program, Report,
     event::{EventId, EventRequest},
     program::{ProgramId, ProgramRequest},
     report::{ReportId, ReportRequest},
     resource::{BlResourceRequest, Resource, ResourceId},
+    resource_group::{BlResourceGroupRequest, ResourceGroup, ResourceGroupId},
     subscription::{Subscription, SubscriptionId, SubscriptionRequest},
     target::Target,
     ven::{BlVenRequest, Ven, VenId},
-    ClientId, Event, Program, Report,
 };
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresStorage;
@@ -24,6 +25,12 @@ use std::sync::Arc;
 pub trait VenObjectPrivacy: Send + Sync + 'static {
     /// Returns the union of the VEN object [`targets`](field@BlVenRequest::targets) with all resources [`targets`](field@BlResourceRequest::targets) of resources that belong to the VEN.
     async fn targets_by_client_id(&self, client_id: &ClientId) -> Result<Vec<Target>, AppError>;
+
+    async fn resource_group_visible_for_client(
+        &self,
+        client_id: &ClientId,
+        resource_group_id: &ResourceGroupId,
+    ) -> Result<bool, AppError>;
 
     async fn ven_id_by_client_id(&self, client_id: &ClientId) -> Result<Option<VenId>, AppError>;
 }
@@ -67,71 +74,83 @@ pub trait Crud: Send + Sync + 'static {
 
 pub trait ProgramCrud:
     Crud<
-    Type = Program,
-    Id = ProgramId,
-    NewType = ProgramRequest,
-    Error = AppError,
-    Filter = crate::api::program::QueryParams,
-    PermissionFilter = Option<ClientId>,
->
+        Type = Program,
+        Id = ProgramId,
+        NewType = ProgramRequest,
+        Error = AppError,
+        Filter = crate::api::program::QueryParams,
+        PermissionFilter = Option<ClientId>,
+    >
 {
 }
 pub trait ReportCrud:
     Crud<
-    Type = Report,
-    Id = ReportId,
-    NewType = ReportRequest,
-    Error = AppError,
-    Filter = crate::api::report::QueryParams,
-    PermissionFilter = Option<ClientId>,
->
+        Type = Report,
+        Id = ReportId,
+        NewType = ReportRequest,
+        Error = AppError,
+        Filter = crate::api::report::QueryParams,
+        PermissionFilter = Option<ClientId>,
+    >
 {
 }
 pub trait EventCrud:
     Crud<
-    Type = Event,
-    Id = EventId,
-    NewType = EventRequest,
-    Error = AppError,
-    Filter = crate::api::event::QueryParams,
-    PermissionFilter = Option<ClientId>,
->
+        Type = Event,
+        Id = EventId,
+        NewType = EventRequest,
+        Error = AppError,
+        Filter = crate::api::event::QueryParams,
+        PermissionFilter = Option<ClientId>,
+    >
 {
 }
 
 pub trait VenCrud:
     Crud<
-    Type = Ven,
-    Id = VenId,
-    NewType = BlVenRequest,
-    Error = AppError,
-    Filter = crate::api::ven::QueryParams,
-    PermissionFilter = Option<ClientId>,
->
+        Type = Ven,
+        Id = VenId,
+        NewType = BlVenRequest,
+        Error = AppError,
+        Filter = crate::api::ven::QueryParams,
+        PermissionFilter = Option<ClientId>,
+    >
 {
 }
 
 pub trait ResourceCrud:
     Crud<
-    Type = Resource,
-    Id = ResourceId,
-    NewType = BlResourceRequest,
-    Error = AppError,
-    Filter = crate::api::resource::QueryParams,
-    PermissionFilter = Option<ClientId>,
->
+        Type = Resource,
+        Id = ResourceId,
+        NewType = BlResourceRequest,
+        Error = AppError,
+        Filter = crate::api::resource::QueryParams,
+        PermissionFilter = Option<ClientId>,
+    >
+{
+}
+
+pub trait ResourceGroupCrud:
+    Crud<
+        Type = ResourceGroup,
+        Id = ResourceGroupId,
+        NewType = BlResourceGroupRequest,
+        Error = AppError,
+        Filter = crate::api::resource_group::QueryParams,
+        PermissionFilter = Option<ClientId>,
+    >
 {
 }
 
 pub trait SubscriptionCrud:
     Crud<
-    Type = Subscription,
-    Id = SubscriptionId,
-    NewType = SubscriptionRequest,
-    Error = AppError,
-    Filter = crate::api::subscription::QueryParams,
-    PermissionFilter = Option<ClientId>,
->
+        Type = Subscription,
+        Id = SubscriptionId,
+        NewType = SubscriptionRequest,
+        Error = AppError,
+        Filter = crate::api::subscription::QueryParams,
+        PermissionFilter = Option<ClientId>,
+    >
 {
 }
 
@@ -194,6 +213,7 @@ pub trait DataSource: Send + Sync + 'static {
     fn vens(&self) -> Arc<dyn VenCrud>;
     fn ven_object_privacy(&self) -> Arc<dyn VenObjectPrivacy>;
     fn resources(&self) -> Arc<dyn ResourceCrud>;
+    fn resource_groups(&self) -> Arc<dyn ResourceGroupCrud>;
     fn subscriptions(&self) -> Arc<dyn SubscriptionCrud>;
     #[cfg(feature = "internal-oauth")]
     fn auth(&self) -> Arc<dyn AuthSource>;

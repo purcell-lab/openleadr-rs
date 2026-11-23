@@ -1,5 +1,5 @@
 #[cfg(feature = "mdns")]
-use openleadr_client::{discover_local_vtns, DiscoveredVtn};
+use openleadr_client::{DiscoveredVtn, discover_local_vtns};
 #[cfg(feature = "mdns")]
 use openleadr_vtn::{VtnConfig, VtnServer};
 #[cfg(feature = "mdns")]
@@ -15,6 +15,12 @@ async fn test_vtn_client_mdns_discovery() {
         mdns_service_type: "_openadr3._tcp.local.".to_string(),
         mdns_server_name: "test-vtn-integration".to_string(),
         mdns_base_path: "".to_string(),
+        mqtt_url: Some("mqtt://localhost:1883".to_string()),
+        mqtt_advertise_url: None,
+        mqtt_username: Some("user".to_string()),
+        mqtt_password: Some("password".to_string()),
+        mqtt_topic_prefix: String::new(),
+        mqtt_ca_path: None,
     };
 
     // Simulate VTN registration

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -17,10 +17,10 @@ use openleadr_wire::{
 
 use crate::{
     api::{
-        subscription, subscription::NotifierState, AppResponse, TargetQueryParams, ValidatedJson,
-        ValidatedQuery,
+        AppResponse, TargetQueryParams, ValidatedJson, ValidatedQuery, subscription,
+        subscription::NotifierState,
     },
-    data_source::{EventCrud, ResourceCrud, VenObjectPrivacy},
+    data_source::{EventCrud, ResourceCrud, VenCrud, VenObjectPrivacy},
     error::AppError,
     jwt::{Scope, User},
 };
@@ -32,9 +32,9 @@ pub async fn get_all(
 ) -> AppResponse<Vec<Resource>> {
     trace!(?query_params);
 
-    let resources = if user.scope.contains(Scope::ReadAll) {
+    let resources = if user.has_scope(Scope::ReadAll) {
         resource_source.retrieve_all(&query_params, &None).await?
-    } else if user.scope.contains(Scope::ReadVenObjects) {
+    } else if user.has_scope(Scope::ReadVenObjects) {
         resource_source
             .retrieve_all(&query_params, &Some(user.client_id()?))
             .await?
@@ -58,9 +58,9 @@ pub async fn get(
     Path(id): Path<ResourceId>,
     User(user): User,
 ) -> AppResponse<Resource> {
-    let resource = if user.scope.contains(Scope::ReadAll) {
+    let resource = if user.has_scope(Scope::ReadAll) {
         resource_source.retrieve(&id, &None).await?
-    } else if user.scope.contains(Scope::ReadVenObjects) {
+    } else if user.has_scope(Scope::ReadVenObjects) {
         resource_source
             .retrieve(&id, &Some(user.client_id()?))
             .await?
@@ -80,22 +80,28 @@ pub async fn get(
     Ok(Json(resource))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Handler which uses many aspects of the state"
+)]
 pub async fn add(
+    State(ven_source): State<Arc<dyn VenCrud>>,
     State(event_source): State<Arc<dyn EventCrud>>,
+    State(privacy): State<Arc<dyn VenObjectPrivacy>>,
     State(resource_source): State<Arc<dyn ResourceCrud>>,
     State(notifier_state): State<Arc<NotifierState>>,
     State(object_privacy): State<Arc<dyn VenObjectPrivacy>>,
     User(user): User,
     ValidatedJson(new_resource): ValidatedJson<ResourceRequest>,
 ) -> Result<(StatusCode, Json<Resource>), AppError> {
-    let resource = if user.scope.contains(Scope::WriteVensBl) {
+    let resource = if user.has_scope(Scope::WriteVensBl) {
         let ResourceRequest::BlResourceRequest(new_resource) = new_resource else {
             return Err(AppError::BadRequest(
                 "Did receive a VEN_RESOURCE_REQUEST, but user is authenticated as a BL client",
             ));
         };
         resource_source.create(new_resource, &None).await?
-    } else if user.scope.contains(Scope::WriteVensVen) {
+    } else if user.has_scope(Scope::WriteVensVen) {
         let ResourceRequest::VenResourceRequest(new_resource) = new_resource else {
             return Err(AppError::BadRequest(
                 "Did receive a BL_RESOURCE_REQUEST, but user is authenticated as a VEN client",
@@ -133,7 +139,9 @@ pub async fn add(
     );
 
     subscription::notify(
+        &*ven_source,
         &*event_source,
+        &*privacy,
         &notifier_state,
         Operation::Create,
         AnyObject::Resource(resource.clone()),
@@ -143,8 +151,14 @@ pub async fn add(
     Ok((StatusCode::CREATED, Json(resource)))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "This is a handler which needs a lot of the state."
+)]
 pub async fn edit(
+    State(ven_source): State<Arc<dyn VenCrud>>,
     State(event_source): State<Arc<dyn EventCrud>>,
+    State(privacy): State<Arc<dyn VenObjectPrivacy>>,
     State(resource_source): State<Arc<dyn ResourceCrud>>,
     State(notifier_state): State<Arc<NotifierState>>,
     State(object_privacy): State<Arc<dyn VenObjectPrivacy>>,
@@ -152,14 +166,14 @@ pub async fn edit(
     User(user): User,
     ValidatedJson(update): ValidatedJson<ResourceRequest>,
 ) -> AppResponse<Resource> {
-    let resource = if user.scope.contains(Scope::WriteVensBl) {
+    let resource = if user.has_scope(Scope::WriteVensBl) {
         let ResourceRequest::BlResourceRequest(update) = update else {
             return Err(AppError::BadRequest(
                 "Did receive a VEN_RESOURCE_REQUEST, but user is authenticated as a BL client",
             ));
         };
         resource_source.update(&id, update, &None).await?
-    } else if user.scope.contains(Scope::WriteVensVen) {
+    } else if user.has_scope(Scope::WriteVensVen) {
         let ResourceRequest::VenResourceRequest(update) = update else {
             return Err(AppError::BadRequest(
                 "Did receive a BL_RESOURCE_REQUEST, but user is authenticated as a VEN client",
@@ -202,7 +216,9 @@ pub async fn edit(
     );
 
     subscription::notify(
+        &*ven_source,
         &*event_source,
+        &*privacy,
         &notifier_state,
         Operation::Update,
         AnyObject::Resource(resource.clone()),
@@ -213,15 +229,17 @@ pub async fn edit(
 }
 
 pub async fn delete(
+    State(ven_source): State<Arc<dyn VenCrud>>,
     State(event_source): State<Arc<dyn EventCrud>>,
+    State(privacy): State<Arc<dyn VenObjectPrivacy>>,
     State(resource_source): State<Arc<dyn ResourceCrud>>,
     State(notifier_state): State<Arc<NotifierState>>,
     Path(id): Path<ResourceId>,
     User(user): User,
 ) -> AppResponse<Resource> {
-    let resource = if user.scope.contains(Scope::WriteVensBl) {
+    let resource = if user.has_scope(Scope::WriteVensBl) {
         resource_source.delete(&id, &None).await?
-    } else if user.scope.contains(Scope::WriteVensVen) {
+    } else if user.has_scope(Scope::WriteVensVen) {
         resource_source
             .delete(&id, &Some(user.client_id()?))
             .await?
@@ -234,7 +252,9 @@ pub async fn delete(
     info!(%id, client_id = user.sub, "deleted resource");
 
     subscription::notify(
+        &*ven_source,
         &*event_source,
+        &*privacy,
         &notifier_state,
         Operation::Delete,
         AnyObject::Resource(resource.clone()),
@@ -282,7 +302,7 @@ mod test {
         #[sqlx::test(fixtures("vens", "resources"))]
         async fn cannot_read_resources_without_correct_scope(db: PgPool) {
             let test = ApiTest::new(
-                db.clone(),
+                db,
                 "test-client",
                 Scope::all()
                     .into_iter()
@@ -301,7 +321,7 @@ mod test {
         #[sqlx::test(fixtures("vens", "resources"))]
         async fn cannot_read_resource_without_correct_scope(db: PgPool) {
             let test = ApiTest::new(
-                db.clone(),
+                db,
                 "test-client",
                 Scope::all()
                     .into_iter()
@@ -320,7 +340,7 @@ mod test {
         #[sqlx::test(fixtures("vens", "resources"))]
         async fn cannot_add_resource_without_correct_scope(db: PgPool) {
             let test = ApiTest::new(
-                db.clone(),
+                db,
                 "test-client",
                 Scope::all()
                     .into_iter()
@@ -339,7 +359,7 @@ mod test {
         #[sqlx::test(fixtures("vens", "resources"))]
         async fn cannot_edit_resource_without_correct_scope(db: PgPool) {
             let test = ApiTest::new(
-                db.clone(),
+                db,
                 "ven-1-client-id",
                 Scope::all()
                     .into_iter()
@@ -358,7 +378,7 @@ mod test {
         #[sqlx::test(fixtures("vens", "resources"))]
         async fn cannot_delete_resource_without_correct_scope(db: PgPool) {
             let test = ApiTest::new(
-                db.clone(),
+                db,
                 "test-client",
                 Scope::all()
                     .into_iter()
@@ -420,7 +440,7 @@ mod test {
 
     #[sqlx::test(fixtures("vens", "resources"))]
     async fn bl_get_all_filtered(db: PgPool) {
-        let test = ApiTest::new(db.clone(), "test-client", vec![Scope::ReadAll]).await;
+        let test = ApiTest::new(db, "test-client", vec![Scope::ReadAll]).await;
 
         let (status, resources) = test
             .request::<Vec<Resource>>(Method::GET, "/resources?skip=1", Body::empty())
@@ -469,7 +489,7 @@ mod test {
 
     #[sqlx::test(fixtures("vens", "resources"))]
     async fn ven_get_all_filtered(db: PgPool) {
-        let test = ApiTest::new(db.clone(), "ven-1-client-id", vec![Scope::ReadVenObjects]).await;
+        let test = ApiTest::new(db, "ven-1-client-id", vec![Scope::ReadVenObjects]).await;
 
         let (status, resources) = test
             .request::<Vec<Resource>>(Method::GET, "/resources", Body::empty())
@@ -506,7 +526,7 @@ mod test {
 
     #[sqlx::test(fixtures("vens", "resources"))]
     async fn filter_by_name(db: PgPool) {
-        let test = ApiTest::new(db.clone(), "test-client", vec![Scope::ReadAll]).await;
+        let test = ApiTest::new(db, "test-client", vec![Scope::ReadAll]).await;
 
         let (status, resource) = test
             .request::<Vec<Resource>>(
@@ -517,11 +537,12 @@ mod test {
             .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(resource[0].id.as_str(), "resource-2");
+        assert_eq!(resource.len(), 1);
     }
 
     #[sqlx::test(fixtures("vens", "resources"))]
     async fn bl_get_single_resource(db: PgPool) {
-        let test = ApiTest::new(db.clone(), "test-client", vec![Scope::ReadAll]).await;
+        let test = ApiTest::new(db, "test-client", vec![Scope::ReadAll]).await;
 
         let (status, resource) = test
             .request::<Resource>(Method::GET, "/resources/resource-1", Body::empty())
@@ -548,7 +569,7 @@ mod test {
 
     #[sqlx::test(fixtures("vens"))]
     async fn bl_add_resource(db: PgPool) {
-        let test = ApiTest::new(db.clone(), "test-client", vec![Scope::WriteVensBl]).await;
+        let test = ApiTest::new(db, "test-client", vec![Scope::WriteVensBl]).await;
 
         let (status, resource) = test
             .request::<Resource>(
@@ -571,7 +592,7 @@ mod test {
 
     #[sqlx::test(fixtures("vens"))]
     async fn ven_cannot_send_bl_add_resource_request(db: PgPool) {
-        let test = ApiTest::new(db.clone(), "test-client", vec![Scope::WriteVensVen]).await;
+        let test = ApiTest::new(db, "test-client", vec![Scope::WriteVensVen]).await;
 
         let (status, problem) = test
             .request::<Problem>(
@@ -600,12 +621,7 @@ mod test {
 
     #[sqlx::test(fixtures("vens", "resources"))]
     async fn bl_update_resource(db: PgPool) {
-        let test = ApiTest::new(
-            db.clone(),
-            "test-client",
-            vec![Scope::WriteVensBl, Scope::ReadAll],
-        )
-        .await;
+        let test = ApiTest::new(db, "test-client", vec![Scope::WriteVensBl, Scope::ReadAll]).await;
 
         let (status, resource) = test
             .request::<Resource>(
@@ -637,7 +653,7 @@ mod test {
 
     #[sqlx::test(fixtures("vens", "resources"))]
     async fn ven_cannot_send_bl_update_resource_request(db: PgPool) {
-        let test = ApiTest::new(db.clone(), "test-client", vec![Scope::WriteVensVen]).await;
+        let test = ApiTest::new(db, "test-client", vec![Scope::WriteVensVen]).await;
 
         let (status, problem) = test
             .request::<Problem>(
@@ -667,7 +683,7 @@ mod test {
 
     #[sqlx::test(fixtures("vens", "resources"))]
     async fn cannot_update_ven_id(db: PgPool) {
-        let test = ApiTest::new(db.clone(), "test-client", vec![Scope::WriteVensBl]).await;
+        let test = ApiTest::new(db, "test-client", vec![Scope::WriteVensBl]).await;
 
         let (status, problem) = test
             .request::<Problem>(
@@ -690,12 +706,7 @@ mod test {
 
     #[sqlx::test(fixtures("vens", "resources"))]
     async fn bl_delete_resource(db: PgPool) {
-        let test = ApiTest::new(
-            db.clone(),
-            "test-client",
-            vec![Scope::WriteVensBl, Scope::ReadAll],
-        )
-        .await;
+        let test = ApiTest::new(db, "test-client", vec![Scope::WriteVensBl, Scope::ReadAll]).await;
         let (status, _) = test
             .request::<Resource>(Method::DELETE, "/resources/resource-1", Body::empty())
             .await;
@@ -709,7 +720,7 @@ mod test {
 
     #[sqlx::test(fixtures("vens"))]
     async fn ven_add_resource(db: PgPool) {
-        let test = ApiTest::new(db.clone(), "ven-1-client-id", vec![Scope::WriteVensVen]).await;
+        let test = ApiTest::new(db, "ven-1-client-id", vec![Scope::WriteVensVen]).await;
 
         let (status, resource) = test
             .request::<Resource>(
@@ -727,9 +738,10 @@ mod test {
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(resource.content.resource_name, "new-resource");
     }
+
     #[sqlx::test(fixtures("vens"))]
     async fn nonexistent_ven_cannot_add_resource(db: PgPool) {
-        let test = ApiTest::new(db.clone(), "nonexistent", vec![Scope::WriteVensVen]).await;
+        let test = ApiTest::new(db, "nonexistent", vec![Scope::WriteVensVen]).await;
 
         let (status, problem) = test
             .request::<Problem>(
@@ -753,7 +765,7 @@ mod test {
 
     #[sqlx::test(fixtures("vens"))]
     async fn bl_cannot_send_ven_add_resource(db: PgPool) {
-        let test = ApiTest::new(db.clone(), "ven-1-client-id", vec![Scope::WriteVensBl]).await;
+        let test = ApiTest::new(db, "ven-1-client-id", vec![Scope::WriteVensBl]).await;
 
         let (status, problem) = test
             .request::<Problem>(
@@ -780,7 +792,7 @@ mod test {
 
     #[sqlx::test(fixtures("vens"))]
     async fn ven_cannot_add_resource_to_other_ven(db: PgPool) {
-        let test = ApiTest::new(db.clone(), "ven-1-client-id", vec![Scope::WriteVensVen]).await;
+        let test = ApiTest::new(db, "ven-1-client-id", vec![Scope::WriteVensVen]).await;
 
         let (status, resource) = test
             .request::<Resource>(
@@ -803,7 +815,7 @@ mod test {
     #[sqlx::test(fixtures("vens", "resources"))]
     async fn ven_update_resource(db: PgPool) {
         let test = ApiTest::new(
-            db.clone(),
+            db,
             "ven-1-client-id",
             vec![Scope::WriteVensVen, Scope::ReadVenObjects],
         )
@@ -867,7 +879,7 @@ mod test {
 
     #[sqlx::test(fixtures("vens", "resources"))]
     async fn nonexistent_ven_cannot_update_resource(db: PgPool) {
-        let test = ApiTest::new(db.clone(), "nonexistent", vec![Scope::WriteVensVen]).await;
+        let test = ApiTest::new(db, "nonexistent", vec![Scope::WriteVensVen]).await;
 
         let (status, problem) = test
             .request::<Problem>(
@@ -892,7 +904,7 @@ mod test {
 
     #[sqlx::test(fixtures("vens", "resources"))]
     async fn bl_cannot_send_ven_update_resource(db: PgPool) {
-        let test = ApiTest::new(db.clone(), "ven-1-client-id", vec![Scope::WriteVensBl]).await;
+        let test = ApiTest::new(db, "ven-1-client-id", vec![Scope::WriteVensBl]).await;
 
         let (status, problem) = test
             .request::<Problem>(
@@ -921,7 +933,7 @@ mod test {
     #[sqlx::test(fixtures("vens", "resources"))]
     async fn ven_delete_resource(db: PgPool) {
         let test = ApiTest::new(
-            db.clone(),
+            db,
             "ven-1-client-id",
             vec![Scope::WriteVensVen, Scope::ReadVenObjects],
         )
@@ -940,7 +952,7 @@ mod test {
     #[sqlx::test(fixtures("vens", "resources"))]
     async fn ven_cannot_delete_resource_of_other_ven(db: PgPool) {
         let test = ApiTest::new(
-            db.clone(),
+            db,
             "ven-1-client-id",
             vec![Scope::WriteVensVen, Scope::ReadVenObjects],
         )
@@ -979,10 +991,12 @@ mod test {
                 .await;
 
             assert_eq!(status, StatusCode::BAD_REQUEST);
-            assert!(error
-                .detail
-                .unwrap()
-                .contains("outside of allowed range 1..=128"))
+            assert!(
+                error
+                    .detail
+                    .unwrap()
+                    .contains("outside of allowed range 1..=128")
+            )
         }
     }
 }

@@ -3,15 +3,14 @@
 Smoke-test client for the openleadr-vtn-au Fly.io deployment.
 
 Talks to the VTN via OpenADR 3.0 over plain HTTPS using only `requests`
-so the auth + payload shapes stay visible. Uses the bl-client (business
-logic / admin) credentials loaded by fixtures/users.sql in upstream
-openleadr-rs to create a Program and an Event, then re-reads them back.
-
-Rotate those default credentials before pointing real devices at this VTN.
+so the auth + payload shapes stay visible. Uses a business-logic client
+(default bl-admin-2611) to create a Program and an Event, then re-reads
+them back. The secret comes from the CLIENT_SECRET environment variable
+and is never stored in this repo.
 
 Usage:
     pip install requests
-    python smoke_test_ven.py
+    CLIENT_SECRET=... python smoke_test_ven.py
     VTN_URL=https://openleadr-vtn-au.fly.dev python smoke_test_ven.py
 """
 from __future__ import annotations
@@ -24,8 +23,10 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 VTN_URL = os.environ.get("VTN_URL", "https://openleadr-vtn-au.fly.dev").rstrip("/")
-CLIENT_ID = os.environ.get("CLIENT_ID", "bl-client")
-CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "bl-client")
+CLIENT_ID = os.environ.get("CLIENT_ID", "bl-admin-2611")
+CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "")
+if not CLIENT_SECRET:
+    sys.exit("Set CLIENT_SECRET (the VTN business-logic client secret).")
 
 TIMEOUT = 15
 

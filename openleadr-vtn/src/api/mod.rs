@@ -1,13 +1,13 @@
 use crate::{error::AppError, state::AppState};
 use axum::{
-    extract::{rejection::JsonRejection, FromRequest, FromRequestParts, Request, State},
-    response::IntoResponse,
     Json,
+    extract::{FromRequest, FromRequestParts, Request, State, rejection::JsonRejection},
+    response::IntoResponse,
 };
 use axum_extra::extract::{Query, QueryRejection};
 use openleadr_wire::target::Target;
 use reqwest::StatusCode;
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::{Deserialize, de::DeserializeOwned};
 use std::fmt::Debug;
 use validator::Validate;
 
@@ -16,6 +16,7 @@ pub(crate) mod event;
 pub(crate) mod program;
 pub(crate) mod report;
 pub(crate) mod resource;
+pub(crate) mod resource_group;
 pub(crate) mod subscription;
 #[cfg(feature = "internal-oauth")]
 pub(crate) mod user;
@@ -103,21 +104,27 @@ pub async fn healthcheck(State(app_state): State<AppState>) -> Result<impl IntoR
 
 #[cfg(test)]
 pub mod test {
-    use crate::{data_source::PostgresStorage, jwt::Scope, state::AppState};
+    use crate::{VtnConfig, data_source::PostgresStorage, jwt::Scope, state::AppState};
     use axum::{
-        body::Body,
-        http::{self, Request, StatusCode},
         Router,
+        body::Body,
+        http::{self, Request, StatusCode, header},
     };
     use http_body_util::BodyExt;
     use openleadr_wire::problem::Problem;
     use reqwest::Method;
     use serde::de::DeserializeOwned;
     use sqlx::PgPool;
-    use std::fmt::Display;
+    use std::{
+        fmt::Display,
+        future::IntoFuture,
+        net::{Ipv4Addr, SocketAddr},
+    };
+    use tokio::{net::TcpListener, task::JoinHandle};
     use tower::ServiceExt;
 
     pub(crate) struct ApiTest {
+        vtn_config: VtnConfig,
         router: Router,
         token: String,
     }
@@ -125,7 +132,9 @@ pub mod test {
     impl ApiTest {
         pub(crate) async fn new(db: PgPool, client_id: impl Display, scope: Vec<Scope>) -> Self {
             let store = PostgresStorage::new(db).unwrap();
-            let app_state = AppState::new(store).await;
+            let mut vtn_config = VtnConfig::from_env();
+            vtn_config.mqtt_topic_prefix = uuid::Uuid::new_v4().to_string() + "/";
+            let app_state = AppState::new(store, &vtn_config).await;
 
             let token = app_state
                 .jwt_manager
@@ -138,7 +147,23 @@ pub mod test {
 
             let router = app_state.into_router();
 
-            Self { router, token }
+            Self {
+                vtn_config,
+                router,
+                token,
+            }
+        }
+
+        #[cfg(feature = "experimental-websockets")]
+        pub(crate) async fn run(
+            &self,
+        ) -> (String, SocketAddr, JoinHandle<Result<(), std::io::Error>>) {
+            let listener = TcpListener::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+                .await
+                .unwrap();
+            let listen_addr = listener.local_addr().unwrap();
+            let handle = tokio::spawn(axum::serve(listener, self.router.clone()).into_future());
+            (self.token.clone(), listen_addr, handle)
         }
 
         pub(crate) async fn request<T: DeserializeOwned>(
@@ -196,6 +221,10 @@ pub mod test {
 
             response.status()
         }
+
+        pub(crate) fn vtn_config(&self) -> &VtnConfig {
+            &self.vtn_config
+        }
     }
 
     #[cfg(feature = "internal-oauth")]
@@ -216,7 +245,7 @@ pub mod test {
 
     pub(crate) async fn state(db: PgPool) -> AppState {
         let store = PostgresStorage::new(db).unwrap();
-        AppState::new(store).await
+        AppState::new(store, &VtnConfig::from_env()).await
     }
 
     #[sqlx::test]
@@ -283,6 +312,49 @@ pub mod test {
             .request::<Problem>(Method::GET, "/not-existent", Body::empty())
             .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    async fn missing_token_is_401_with_www_authenticate(db: PgPool) {
+        let mut test = state(db).await.into_router();
+
+        let response = (&mut test)
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/programs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let headers = response.headers();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(headers[header::WWW_AUTHENTICATE], r#"Bearer realm="VTN""#);
+    }
+
+    #[sqlx::test]
+    async fn invalid_token_is_401_with_www_authenticate(db: PgPool) {
+        let mut test = ApiTest::new(db.clone(), "test-client", vec![]).await;
+
+        let response = (&mut test.router)
+            .oneshot(
+                Request::builder()
+                    .header(header::AUTHORIZATION, "Bearer invalid")
+                    .method(Method::GET)
+                    .uri("/programs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let headers = response.headers();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(headers[header::WWW_AUTHENTICATE], r#"Bearer realm="VTN""#);
     }
 
     #[sqlx::test]

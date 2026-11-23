@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -16,10 +16,10 @@ use openleadr_wire::{
 
 use crate::{
     api::{
-        subscription, subscription::NotifierState, AppResponse, TargetQueryParams, ValidatedJson,
-        ValidatedQuery,
+        AppResponse, TargetQueryParams, ValidatedJson, ValidatedQuery, subscription,
+        subscription::NotifierState,
     },
-    data_source::{EventCrud, VenCrud},
+    data_source::{EventCrud, VenCrud, VenObjectPrivacy},
     error::AppError,
     jwt::{Scope, User},
 };
@@ -31,9 +31,9 @@ pub async fn get_all(
 ) -> AppResponse<Vec<Ven>> {
     trace!(?query_params);
 
-    let vens = if user.scope.contains(Scope::ReadAll) {
+    let vens = if user.has_scope(Scope::ReadAll) {
         ven_source.retrieve_all(&query_params, &None).await?
-    } else if user.scope.contains(Scope::ReadVenObjects) {
+    } else if user.has_scope(Scope::ReadVenObjects) {
         ven_source
             .retrieve_all(&query_params, &Some(user.client_id()?))
             .await?
@@ -53,9 +53,9 @@ pub async fn get(
     Path(id): Path<VenId>,
     User(user): User,
 ) -> AppResponse<Ven> {
-    let ven = if user.scope.contains(Scope::ReadAll) {
+    let ven = if user.has_scope(Scope::ReadAll) {
         ven_source.retrieve(&id, &None).await?
-    } else if user.scope.contains(Scope::ReadVenObjects) {
+    } else if user.has_scope(Scope::ReadVenObjects) {
         ven_source.retrieve(&id, &Some(user.client_id()?)).await?
     } else {
         return Err(AppError::Forbidden(
@@ -71,18 +71,19 @@ pub async fn get(
 pub async fn add(
     State(event_source): State<Arc<dyn EventCrud>>,
     State(ven_source): State<Arc<dyn VenCrud>>,
+    State(privacy): State<Arc<dyn VenObjectPrivacy>>,
     State(notifier_state): State<Arc<NotifierState>>,
     User(user): User,
     ValidatedJson(new_ven): ValidatedJson<VenRequest>,
 ) -> Result<(StatusCode, Json<Ven>), AppError> {
-    let ven = if user.scope.contains(Scope::WriteVensBl) {
+    let ven = if user.has_scope(Scope::WriteVensBl) {
         let VenRequest::BlVenRequest(new_ven) = new_ven else {
             return Err(AppError::BadRequest(
                 "Did receive a VEN_VEN_REQUEST, but user is authenticated as a BL client",
             ));
         };
         ven_source.create(new_ven, &None).await?
-    } else if user.scope.contains(Scope::WriteVensVen) {
+    } else if user.has_scope(Scope::WriteVensVen) {
         let VenRequest::VenVenRequest(new_ven) = new_ven else {
             return Err(AppError::BadRequest(
                 "Did receive a BL_VEN_REQUEST, but user is authenticated as a VEN client",
@@ -107,7 +108,9 @@ pub async fn add(
     info!(%ven.id, ven.ven_name=ven.content.ven_name, client_id = user.sub, "VEN added");
 
     subscription::notify(
+        &*ven_source,
         &*event_source,
+        &*privacy,
         &notifier_state,
         Operation::Create,
         AnyObject::Ven(ven.clone()),
@@ -120,19 +123,20 @@ pub async fn add(
 pub async fn edit(
     State(event_source): State<Arc<dyn EventCrud>>,
     State(ven_source): State<Arc<dyn VenCrud>>,
+    State(privacy): State<Arc<dyn VenObjectPrivacy>>,
     State(notifier_state): State<Arc<NotifierState>>,
     Path(id): Path<VenId>,
     User(user): User,
     ValidatedJson(update): ValidatedJson<VenRequest>,
 ) -> AppResponse<Ven> {
-    let ven = if user.scope.contains(Scope::WriteVensBl) {
+    let ven = if user.has_scope(Scope::WriteVensBl) {
         let VenRequest::BlVenRequest(update) = update else {
             return Err(AppError::BadRequest(
                 "Did receive a VEN_VEN_REQUEST, but user is authenticated as a BL client",
             ));
         };
         ven_source.update(&id, update, &None).await?
-    } else if user.scope.contains(Scope::WriteVensVen) {
+    } else if user.has_scope(Scope::WriteVensVen) {
         let VenRequest::VenVenRequest(update) = update else {
             return Err(AppError::BadRequest(
                 "Did receive a BL_VEN_REQUEST, but user is authenticated as a VEN client",
@@ -159,7 +163,9 @@ pub async fn edit(
     info!(%ven.id, ven.ven_name=ven.content.ven_name, client_id = user.sub, "VEN updated");
 
     subscription::notify(
+        &*ven_source,
         &*event_source,
+        &*privacy,
         &notifier_state,
         Operation::Update,
         AnyObject::Ven(ven.clone()),
@@ -172,12 +178,15 @@ pub async fn edit(
 pub async fn delete(
     State(event_source): State<Arc<dyn EventCrud>>,
     State(ven_source): State<Arc<dyn VenCrud>>,
+    State(privacy): State<Arc<dyn VenObjectPrivacy>>,
     State(notifier_state): State<Arc<NotifierState>>,
     Path(id): Path<VenId>,
     User(user): User,
 ) -> AppResponse<Ven> {
-    let ven = if user.scope.contains(Scope::WriteVensBl) {
+    let ven = if user.has_scope(Scope::WriteVensBl) {
         ven_source.delete(&id, &None).await?
+    } else if user.has_scope(Scope::WriteVensVen) {
+        ven_source.delete(&id, &Some(user.client_id()?)).await?
     } else {
         return Err(AppError::Forbidden("Missing 'write_vens_bl' scope"));
     };
@@ -185,7 +194,9 @@ pub async fn delete(
     info!(%ven.id, ven.ven_name=ven.content.ven_name, client_id = user.sub, "VEN deleted");
 
     subscription::notify(
+        &*ven_source,
         &*event_source,
+        &*privacy,
         &notifier_state,
         Operation::Delete,
         AnyObject::Ven(ven.clone()),
@@ -219,9 +230,9 @@ mod tests {
     use crate::{api::test::ApiTest, jwt::Scope};
     use axum::{body::Body, http::StatusCode};
     use openleadr_wire::{
+        Ven,
         problem::Problem,
         ven::{BlVenRequest, VenRequest, VenVenRequest},
-        Ven,
     };
     use reqwest::Method;
     use sqlx::PgPool;
@@ -298,7 +309,7 @@ mod tests {
         }
 
         #[sqlx::test(fixtures("vens"))]
-        async fn cannot_edit_vev_without_correct_scope(db: PgPool) {
+        async fn cannot_edit_ven_without_correct_scope(db: PgPool) {
             let test = ApiTest::new(
                 db.clone(),
                 "ven-1-client-id",
@@ -334,7 +345,7 @@ mod tests {
                 "test-client",
                 Scope::all()
                     .into_iter()
-                    .filter(|s| *s != Scope::WriteVensBl)
+                    .filter(|&s| s != Scope::WriteVensBl && s != Scope::WriteVensVen)
                     .collect(),
             )
             .await;
@@ -344,6 +355,44 @@ mod tests {
                 .await;
 
             assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+
+        #[sqlx::test(fixtures("vens"))]
+        async fn can_delete_own_resource_with_correct_scope(db: PgPool) {
+            let test = ApiTest::new(
+                db.clone(),
+                "ven-1-client-id",
+                Scope::all()
+                    .into_iter()
+                    .filter(|&s| s != Scope::WriteVensBl)
+                    .collect(),
+            )
+            .await;
+
+            let (status, _) = test
+                .request::<Ven>(Method::DELETE, "/vens/ven-1", Body::empty())
+                .await;
+
+            assert_eq!(status, StatusCode::OK);
+        }
+
+        #[sqlx::test(fixtures("vens"))]
+        async fn ven_cannot_delete_other_ven(db: PgPool) {
+            let test = ApiTest::new(
+                db.clone(),
+                "test-client",
+                Scope::all()
+                    .into_iter()
+                    .filter(|&s| s != Scope::WriteVensBl)
+                    .collect(),
+            )
+            .await;
+
+            let (status, _) = test
+                .request::<Problem>(Method::DELETE, "/vens/ven-1", Body::empty())
+                .await;
+
+            assert_eq!(status, StatusCode::NOT_FOUND);
         }
     }
 
@@ -786,10 +835,12 @@ mod tests {
                 .await;
 
             assert_eq!(status, StatusCode::BAD_REQUEST);
-            assert!(error
-                .detail
-                .unwrap()
-                .contains("outside of allowed range 1..=128"))
+            assert!(
+                error
+                    .detail
+                    .unwrap()
+                    .contains("outside of allowed range 1..=128")
+            )
         }
     }
 }
