@@ -23,14 +23,15 @@ use crate::{
     },
     data_source::{EventCrud, VenCrud, VenObjectPrivacy},
     error::AppError,
-    jwt::{Scope, User},
+    jwt::{MaybeUser, Scope, User},
 };
 
 pub async fn get_all(
     State(event_source): State<Arc<dyn EventCrud>>,
     ValidatedQuery(query_params): ValidatedQuery<QueryParams>,
-    User(user): User,
+    maybe_user: MaybeUser,
 ) -> AppResponse<Vec<Event>> {
+    let User(user) = maybe_user.into_user_or_anonymous();
     trace!(?query_params);
     let events = if user.has_scope(Scope::ReadAll) {
         event_source.retrieve_all(&query_params, &None).await?
@@ -51,8 +52,9 @@ pub async fn get_all(
 pub async fn get(
     State(event_source): State<Arc<dyn EventCrud>>,
     Path(id): Path<EventId>,
-    User(user): User,
+    maybe_user: MaybeUser,
 ) -> AppResponse<Event> {
+    let User(user) = maybe_user.into_user_or_anonymous();
     let event = if user.has_scope(Scope::ReadAll) {
         event_source.retrieve(&id, &None).await?
     } else if user.has_scope(Scope::ReadTargets) {

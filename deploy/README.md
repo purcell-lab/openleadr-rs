@@ -9,6 +9,50 @@ The upstream `vtn.Dockerfile` and `docker-compose.yml` already exist in
 `OpenLEADR/openleadr-rs`, so we only need these two files plus a Fly app
 and a managed Postgres cluster.
 
+## Current deployment and upgrades
+
+The live app is `openleadr-vtn-au` in `syd`. This branch is upstream
+[v0.2.8](https://github.com/OpenLEADR/openleadr-rs/releases/tag/v0.2.8) plus
+two local changes:
+
+- this `deploy/` folder, `fly.toml` and `.github/workflows/fly-deploy.yml`;
+- **public reads**: when the Fly secret `PUBLIC_READS=true` is set,
+  `GET /programs`, `/programs/{id}`, `/events` and `/events/{id}` accept
+  requests with no token, as a `read_all` user. Every other endpoint, and
+  every write, still needs a Bearer token. This change is for this
+  deployment only and must not go upstream.
+
+### Upgrading from the May 2026 build (about v0.2.2)
+
+1. **Back up the database first.** Five migrations run on startup and
+   two of them rebuild the `scope` enum, so they cannot be rolled back:
+   `resource_groups`, `subscriptions_client_id` (`write_subscriptions`
+   becomes `write_subscriptions_ven`), the `rg_family` view,
+   `write_reports_bl`/`write_reports_ven` (`write_reports` becomes
+   `write_reports_ven`), and dropping the unique index on report names.
+2. **Keep `PUBLIC_READS`.** It is a Fly secret, not in `fly.toml`.
+   Check with `fly secrets list --app openleadr-vtn-au`.
+3. **MQTT stays off.** v0.2.8 only enables MQTT when `MQTT_URL`,
+   `MQTT_USERNAME` and `MQTT_PASSWORD` are all set. Setting only some of
+   them is an error.
+4. The build now needs cmake, a C++ compiler and OpenSSL headers for
+   `paho-mqtt`. Upstream's `vtn.Dockerfile` installs them, so a remote
+   Fly build works without changes. It takes a few minutes longer.
+5. Deploy: `fly deploy --app openleadr-vtn-au --remote-only --dockerfile vtn.Dockerfile`.
+6. Check: `python deploy/check_vtn.py` (read-only, no token needed while
+   public reads are on). Then confirm the bridge is still publishing.
+
+### Credentials
+
+The business-logic client is `bl-admin-2611` on the VTN user `bl-client`.
+Its secret is in Home Assistant `secrets.yaml` as
+`openadr_vtn_client_secret` (see purcell-lab/ha-config #638). Never
+commit it. The `fixtures/users.sql` test logins are not loaded on this
+deployment.
+
+The GitHub Actions deploy needs a repository secret `FLY_API_TOKEN`
+(section 6). It is not set yet, so pushes to `main` do not deploy.
+
 ---
 
 ## 1. Fork upstream into your GitHub account
@@ -47,10 +91,10 @@ From the repo root (don't run `fly launch` — we already have `fly.toml`):
 
 ```bash
 # Pick a unique app name — it becomes <name>.fly.dev
-fly apps create mark-vtn --org personal
+fly apps create openleadr-vtn-au --org personal
 ```
 
-Edit `fly.toml` and replace `<YOUR-APP-NAME>` with `mark-vtn`.
+Edit `fly.toml` and replace `<YOUR-APP-NAME>` with `openleadr-vtn-au`.
 
 ## 4. Create Managed Postgres (Sydney)
 
@@ -73,7 +117,7 @@ fly managed-postgres connection-string mark-vtn-db
 
 > If `managed-postgres` isn't enabled on your org yet, fall back to the
 > older unmanaged Postgres with `fly postgres create --region syd --name mark-vtn-db --vm-size shared-cpu-1x --volume-size 1`
-> and `fly postgres attach --app mark-vtn mark-vtn-db`.
+> and `fly postgres attach --app openleadr-vtn-au mark-vtn-db`.
 
 ## 5. Set app secrets
 
@@ -81,7 +125,7 @@ The VTN reads its config from env vars. Set them as Fly secrets so they're
 encrypted at rest and available to the running VM:
 
 ```bash
-APP=mark-vtn
+APP=openleadr-vtn-au
 URL="https://${APP}.fly.dev"
 
 # Generate a random base64 secret for signing OAuth tokens
@@ -102,7 +146,7 @@ fly secrets set --app "$APP" \
 Create a deploy token scoped to this one app:
 
 ```bash
-fly tokens create deploy --app mark-vtn --expiry 8760h
+fly tokens create deploy --app openleadr-vtn-au --expiry 8760h
 # copy the printed token
 ```
 
@@ -154,33 +198,33 @@ public test credentials.
 ## 8. Smoke test
 
 ```bash
-curl https://mark-vtn.fly.dev/
+curl https://openleadr-vtn-au.fly.dev/
 
-# OAuth token request
-curl -s -X POST https://mark-vtn.fly.dev/auth/token \
+# OAuth token request (CLIENT_SECRET from HA secrets.yaml, never committed)
+curl -s -X POST https://openleadr-vtn-au.fly.dev/auth/token \
   -d "grant_type=client_credentials" \
-  -d "client_id=bl-client" \
-  -d "client_secret=bl-client"
+  -d "client_id=bl-admin-2611" \
+  --data-urlencode "client_secret=$CLIENT_SECRET"
 # → {"access_token":"eyJ...","token_type":"Bearer","expires_in":3600}
 
-TOKEN=$(curl -s -X POST https://mark-vtn.fly.dev/auth/token \
-  -d "grant_type=client_credentials&client_id=bl-client&client_secret=bl-client" \
+TOKEN=$(curl -s -X POST https://openleadr-vtn-au.fly.dev/auth/token \
+  -d "grant_type=client_credentials&client_id=bl-admin-2611" --data-urlencode "client_secret=$CLIENT_SECRET" \
   | jq -r .access_token)
 
 # List programs (empty array on a fresh DB)
-curl -H "Authorization: Bearer $TOKEN" https://mark-vtn.fly.dev/programs
+curl -H "Authorization: Bearer $TOKEN" https://openleadr-vtn-au.fly.dev/programs
 ```
 
 ## 9. Day-to-day commands
 
 | Task | Command |
 |---|---|
-| Tail logs | `fly logs --app mark-vtn` |
-| SSH into the VM | `fly ssh console --app mark-vtn` |
+| Tail logs | `fly logs --app openleadr-vtn-au` |
+| SSH into the VM | `fly ssh console --app openleadr-vtn-au` |
 | Manual deploy from laptop | `fly deploy --dockerfile vtn.Dockerfile` |
 | psql into the DB | `fly managed-postgres connect mark-vtn-db` |
 | Resize VM | `fly scale vm shared-cpu-2x --memory 1024` |
-| See current secrets (names only) | `fly secrets list --app mark-vtn` |
+| See current secrets (names only) | `fly secrets list --app openleadr-vtn-au` |
 
 ## 10. Cost sanity check
 
@@ -206,6 +250,6 @@ For a personal sandbox that wakes a few times a day, expect <USD $10/mo.
 - **Auto-stop and OpenADR polling** — VENs that long-poll every few
   seconds will keep the machine awake, which is fine; VENs that poll
   rarely will let it sleep, saving credits.
-- **Custom domain** — `fly certs create vtn.purcell.id.au --app mark-vtn`
-  then point a CNAME at `mark-vtn.fly.dev`. After the cert validates,
+- **Custom domain** — `fly certs create vtn.purcell.id.au --app openleadr-vtn-au`
+  then point a CNAME at `openleadr-vtn-au.fly.dev`. After the cert validates,
   update `OAUTH_TOKEN_URL` / `OAUTH_VALID_AUDIENCES` secrets accordingly.

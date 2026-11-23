@@ -16,7 +16,7 @@ use crate::{
     },
     data_source::{EventCrud, ProgramCrud, VenCrud, VenObjectPrivacy},
     error::AppError,
-    jwt::{Scope, User},
+    jwt::{MaybeUser, Scope, User},
 };
 use openleadr_wire::{
     Program,
@@ -27,8 +27,9 @@ use openleadr_wire::{
 pub async fn get_all(
     State(program_source): State<Arc<dyn ProgramCrud>>,
     ValidatedQuery(query_params): ValidatedQuery<QueryParams>,
-    User(user): User,
+    maybe_user: MaybeUser,
 ) -> AppResponse<Vec<Program>> {
+    let User(user) = maybe_user.into_user_or_anonymous();
     trace!(?query_params);
 
     let programs = if user.has_scope(Scope::ReadAll) {
@@ -55,8 +56,9 @@ pub async fn get_all(
 pub async fn get(
     State(program_source): State<Arc<dyn ProgramCrud>>,
     Path(id): Path<ProgramId>,
-    User(user): User,
+    maybe_user: MaybeUser,
 ) -> AppResponse<Program> {
+    let User(user) = maybe_user.into_user_or_anonymous();
     let program = if user.has_scope(Scope::ReadAll) {
         program_source.retrieve(&id, &None).await?
     } else if user.has_scope(Scope::ReadTargets) {

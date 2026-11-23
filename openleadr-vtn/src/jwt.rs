@@ -263,6 +263,21 @@ impl Claims {
         }
     }
 
+    /// Synthetic anonymous claims used when `PUBLIC_READS=true` allows
+    /// unauthenticated GET requests on the program and event read endpoints.
+    /// Grants `read_all` only. Never encoded into a JWT or used for writes.
+    pub(crate) fn anonymous_read_all() -> Self {
+        Self {
+            sub: "anonymous".into(),
+            exp: 0,
+            iat: None,
+            nbf: None,
+            aud: None,
+            scope: vec![Scope::ReadAll].into(),
+            roles: vec![].into(),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn from_scopes(scopes: Vec<Scope>) -> Self {
         Self {
@@ -630,6 +645,48 @@ where
     }
 }
 
+/// Returns true when the `PUBLIC_READS` environment variable enables anonymous reads.
+fn public_reads_enabled() -> bool {
+    std::env::var("PUBLIC_READS")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+        .unwrap_or(false)
+}
+
+/// Optional user extractor for the program and event GET endpoints.
+///
+/// - A valid Bearer token gives `MaybeUser(Some(user))` with the real claims.
+/// - A missing or invalid token gives `MaybeUser(None)` when `PUBLIC_READS=true`,
+///   and the normal authentication error otherwise.
+///
+/// SECURITY: only use this on read-only endpoints that may be public.
+/// Never use it on create, update or delete handlers.
+pub struct MaybeUser(pub(crate) Option<User>);
+
+impl MaybeUser {
+    /// The supplied user, or an anonymous `read_all` user when none was supplied.
+    pub(crate) fn into_user_or_anonymous(self) -> User {
+        self.0.unwrap_or_else(|| User(Claims::anonymous_read_all()))
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for MaybeUser
+where
+    Arc<JwtManager>: FromRef<S>,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        match User::from_request_parts(parts, state).await {
+            Ok(u) => Ok(MaybeUser(Some(u))),
+            Err(_) if public_reads_enabled() => {
+                trace!("PUBLIC_READS enabled and no valid Bearer token; treating as anonymous");
+                Ok(MaybeUser(None))
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::{
@@ -654,7 +711,7 @@ mod test {
                 Scope::WriteSubscriptionsVen,
                 Scope::WriteVensBl,
                 Scope::WriteVensVen,
-                Scope::WriteUsers,
+                Scope::WriteVensBl,
             ]
         }
     }
@@ -791,5 +848,30 @@ mod test {
                 roles: crate::jwt::Scopes(Vec::with_capacity(0)),
             }
         );
+    }
+
+    #[test]
+    fn anonymous_read_all_grants_only_read_all() {
+        let claims = Claims::anonymous_read_all();
+        assert!(claims.has_scope(Scope::ReadAll));
+        for scope in [
+            Scope::ReadTargets,
+            Scope::ReadVenObjects,
+            Scope::WritePrograms,
+            Scope::WriteEvents,
+            Scope::WriteVensBl,
+        ] {
+            assert!(
+                !claims.has_scope(scope),
+                "anonymous claims must not grant {scope:?}"
+            );
+        }
+        assert!(claims.client_id().is_ok_and(|c| c.as_str() == "anonymous"));
+    }
+
+    #[test]
+    fn maybe_user_without_token_resolves_to_anonymous() {
+        let crate::jwt::User(claims) = crate::jwt::MaybeUser(None).into_user_or_anonymous();
+        assert_eq!(claims, Claims::anonymous_read_all());
     }
 }
