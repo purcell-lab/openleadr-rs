@@ -31,4 +31,7 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 ignore = [
     # proc-macro-error2
     "RUSTSEC-2026-0173",
+    # chrono is unmaintained and has no replacement release. It is pulled in by
+    # openleadr-wire, iso8601-duration and sqlx; replacing it is an upstream change.
+    "RUSTSEC-2026-0543",
 ]
