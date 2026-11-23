@@ -1,0 +1,9 @@
+# Rules before any "user" line apply to anonymous clients.
+topic read programs/#
+topic read events/#
+topic read push/programs/#
+topic read push/events/#
+
+# The VTN publishes every notification topic.
+user vtn
+topic readwrite #

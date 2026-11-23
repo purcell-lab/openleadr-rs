@@ -253,3 +253,63 @@ For a personal sandbox that wakes a few times a day, expect <USD $10/mo.
 - **Custom domain** — `fly certs create vtn.purcell.id.au --app openleadr-vtn-au`
   then point a CNAME at `openleadr-vtn-au.fly.dev`. After the cert validates,
   update `OAUTH_TOKEN_URL` / `OAUTH_VALID_AUDIENCES` secrets accordingly.
+
+## MQTT notifications
+
+The VTN publishes OpenADR notifications to a Mosquitto broker in the
+separate Fly app `openleadr-mqtt-au` (Sydney). The broker files are in
+`deploy/mqtt/`.
+
+| Path | Address | Who |
+|---|---|---|
+| VTN to broker | `tcp://openleadr-mqtt-au.internal:1883` (Fly private network only) | user `vtn`, publishes every topic |
+| Public subscribers, MQTT over TLS | `mqtts://openleadr-mqtt-au.fly.dev:8883` (Fly terminates TLS, forwards to listener 1884) | anonymous, read-only on `programs/#`, `events/#`, `push/programs/#`, `push/events/#` |
+| Public subscribers, websockets | `wss://openleadr-mqtt-au.fly.dev:443` (Fly terminates TLS, forwards to listener 8080) | same as above |
+
+The VTN advertises one URI in `GET /notifiers`. It advertises the `mqtts://`
+address, because the Home Assistant VEN (`openadr3-ven-hass`) picks up the
+broker from there and supports only MQTT over TCP. Browser and other
+websockets clients can still use the `wss://` address directly.
+
+The `vens/`, `reports/`, `resources/` and `resource_groups/` topics are not
+readable anonymously. Messages are QoS 0 and not retained, so a new
+subscriber sees the next update. On each bridge cycle every event produces an
+`events/...` message carrying the full event (about 78 KB for a 7-day
+program) and a small `push/events/...` message.
+
+### Deploy the broker
+
+```bash
+cd deploy/mqtt
+fly apps create openleadr-mqtt-au --org personal
+fly secrets set MQTT_VTN_PASSWORD=<random> -a openleadr-mqtt-au --stage
+fly deploy --remote-only --ha=false -a openleadr-mqtt-au
+```
+
+### Point the VTN at the broker
+
+```bash
+fly secrets set -a openleadr-vtn-au \
+  MQTT_URL=tcp://openleadr-mqtt-au.internal:1883 \
+  MQTT_ADVERTISE_URL=mqtts://openleadr-mqtt-au.fly.dev:8883 \
+  MQTT_USERNAME=vtn MQTT_PASSWORD=<same random>
+```
+
+The VTN connects to the broker at start-up and refuses to start if it cannot.
+The broker therefore runs with `auto_stop_machines = "off"` and
+`min_machines_running = 1`. To turn MQTT off, unset all four `MQTT_*`
+secrets on `openleadr-vtn-au`.
+
+### Test as an anonymous subscriber
+
+```python
+import paho.mqtt.client as m, ssl
+c = m.Client(m.CallbackAPIVersion.VERSION2, transport="websockets")
+c.tls_set(cert_reqs=ssl.CERT_REQUIRED)
+c.on_message = lambda c, u, msg: print(msg.topic, len(msg.payload))
+c.connect("openleadr-mqtt-au.fly.dev", 443)
+c.subscribe("events/#")
+c.loop_forever()
+```
+
+For MQTT over TLS, drop `transport="websockets"` and connect to port 8883.
