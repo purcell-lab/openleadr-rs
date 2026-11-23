@@ -1,0 +1,193 @@
+{
+ "id": "01a20a3f-6d15-70b8-94f5-5b8e85f45a8b",
+ "operation": "UPDATE",
+ "objectType": "EVENT",
+ "object": {
+  "id": "6728ca6d-2256-4438-9ac9-40bd95739538",
+  "createdDateTime": "2026-11-23T12:00:23.852498+00:00",
+  "modificationDateTime": "2026-11-23T21:10:58.580057+00:00",
+  "objectType": "EVENT",
+  "programID": "18c6fe38-883e-46f2-8365-28a776ab9bad",
+  "eventName": "AU-NSW1-P5MIN",
+  "priority": 1,
+  "targets": [],
+  "payloadDescriptors": [
+   {
+    "payloadType": "PRICE",
+    "units": "KWH",
+    "currency": "AUD"
+   }
+  ],
+  "intervalPeriod": {
+   "start": "2026-11-23T21:10:45+00:00",
+   "duration": "P0Y0M0DT0H54M0S"
+  },
+  "intervals": [
+   {
+    "id": 0,
+    "intervalPeriod": {
+     "start": "2026-11-23T21:10:00+00:00",
+     "duration": "P0Y0M0DT0H5M0S"
+    },
+    "payloads": [
+     {
+      "type": "PRICE",
+      "values": [
+       0.09484
+      ]
+     }
+    ]
+   },
+   {
+    "id": 1,
+    "intervalPeriod": {
+     "start": "2026-11-23T21:15:00+00:00",
+     "duration": "P0Y0M0DT0H5M0S"
+    },
+    "payloads": [
+     {
+      "type": "PRICE",
+      "values": [
+       0.083185
+      ]
+     }
+    ]
+   },
+   {
+    "id": 2,
+    "intervalPeriod": {
+     "start": "2026-11-23T21:20:00+00:00",
+     "duration": "P0Y0M0DT0H5M0S"
+    },
+    "payloads": [
+     {
+      "type": "PRICE",
+      "values": [
+       0.052167
+      ]
+     }
+    ]
+   },
+   {
+    "id": 3,
+    "intervalPeriod": {
+     "start": "2026-11-23T21:25:00+00:00",
+     "duration": "P0Y0M0DT0H5M0S"
+    },
+    "payloads": [
+     {
+      "type": "PRICE",
+      "values": [
+       0.051974
+      ]
+     }
+    ]
+   },
+   {
+    "id": 4,
+    "intervalPeriod": {
+     "start": "2026-11-23T21:30:00+00:00",
+     "duration": "P0Y0M0DT0H5M0S"
+    },
+    "payloads": [
+     {
+      "type": "PRICE",
+      "values": [
+       0.061519
+      ]
+     }
+    ]
+   },
+   {
+    "id": 5,
+    "intervalPeriod": {
+     "start": "2026-11-23T21:35:00+00:00",
+     "duration": "P0Y0M0DT0H5M0S"
+    },
+    "payloads": [
+     {
+      "type": "PRICE",
+      "values": [
+       0.08012
+      ]
+     }
+    ]
+   },
+   {
+    "id": 6,
+    "intervalPeriod": {
+     "start": "2026-11-23T21:40:00+00:00",
+     "duration": "P0Y0M0DT0H5M0S"
+    },
+    "payloads": [
+     {
+      "type": "PRICE",
+      "values": [
+       0.048608
+      ]
+     }
+    ]
+   },
+   {
+    "id": 7,
+    "intervalPeriod": {
+     "start": "2026-11-23T21:45:00+00:00",
+     "duration": "P0Y0M0DT0H5M0S"
+    },
+    "payloads": [
+     {
+      "type": "PRICE",
+      "values": [
+       0.0495
+      ]
+     }
+    ]
+   },
+   {
+    "id": 8,
+    "intervalPeriod": {
+     "start": "2026-11-23T21:50:00+00:00",
+     "duration": "P0Y0M0DT0H5M0S"
+    },
+    "payloads": [
+     {
+      "type": "PRICE",
+      "values": [
+       0.08891
+      ]
+     }
+    ]
+   },
+   {
+    "id": 9,
+    "intervalPeriod": {
+     "start": "2026-11-23T21:55:00+00:00",
+     "duration": "P0Y0M0DT0H5M0S"
+    },
+    "payloads": [
+     {
+      "type": "PRICE",
+      "values": [
+       0.08891
+      ]
+     }
+    ]
+   },
+   {
+    "id": 10,
+    "intervalPeriod": {
+     "start": "2026-11-23T22:00:00+00:00",
+     "duration": "P0Y0M0DT0H5M0S"
+    },
+    "payloads": [
+     {
+      "type": "PRICE",
+      "values": [
+       0.08891
+      ]
+     }
+    ]
+   }
+  ]
+ }
+}
