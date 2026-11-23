@@ -32,7 +32,7 @@ use crate::{
     api::{AppResponse, ValidatedJson, ValidatedQuery},
     data_source::{EventCrud, SubscriptionCrud, VenCrud, VenObjectPrivacy},
     error::AppError,
-    jwt::{Claims, Scope, User},
+    jwt::{Claims, MaybeUser, Scope, User},
     state::AppState,
 };
 
@@ -703,9 +703,12 @@ async fn notify_mqtt(
     }
 }
 
+/// `GET /notifiers`. Read-only and user-independent, so it follows
+/// `PUBLIC_READS` like the program and event GET endpoints: anonymous VENs
+/// (for example openadr3-ven-hass) can discover the MQTT broker.
 pub(crate) async fn notifier_get(
     State(notifier_state): State<Arc<NotifierState>>,
-    User(_): User,
+    _user: MaybeUser,
 ) -> Result<Json<NotifiersResponse>, AppError> {
     Ok(Json(NotifiersResponse {
         websocket: cfg!(feature = "experimental-websockets"),
